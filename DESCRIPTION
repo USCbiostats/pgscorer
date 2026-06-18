@@ -1,0 +1,17 @@
+Package: pgscorer
+Title: Compute Polygenic Risk Scores from PGS Catalog Models
+Version: 0.1.0
+Authors@R: person("John", "Morrison", email = "jmorr@usc.edu",
+    role = c("aut", "cre"))
+Description: Computes polygenic risk scores (PRS) from PGS Catalog scoring
+    files against a BGZF-compressed VCF file. Unions positions across all
+    models, queries the VCF once per position in batches, then scores each
+    model from the shared dosage table. On Windows batches run in-process;
+    on other platforms each batch runs in an isolated Rscript subprocess to
+    bound peak memory usage.
+License: MIT + file LICENSE
+Imports:
+    tabixr,
+    data.table
+Encoding: UTF-8
+RoxygenNote: 7.3.2
