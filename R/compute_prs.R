@@ -1,39 +1,62 @@
 #' Compute Polygenic Risk Scores from PGS Catalog Models
 #'
-#' Unions SNP positions from one or more PGS Catalog scoring files, queries a
-#' BGZF-compressed VCF file once per position (in batches), then computes a
-#' PRS for every model from the shared dosage table.
+#' Reads one or more PGS Catalog scoring files, determines which chromosomes
+#' they need, and scores each model against per-chromosome genotype files
+#' found in \code{geno_dir} — either BGZF/Tabix VCF (\code{chr<N>.vcf.gz}) or
+#' BinaryDosage Format 5 (\code{chr<N>.bdose}). Positions are unioned across
+#' models on each chromosome so a shared position is only queried once.
 #'
-#' On Windows the VCF is queried in-process in sequential batches.  On other
-#' platforms each batch is run in its own \code{Rscript} subprocess, isolating
-#' batch memory so peak footprint is bounded to one batch at a time.
+#' Genotype files are discovered by name: \code{chr1.vcf.gz}, \code{chr2.vcf.gz},
+#' ..., or \code{chr1.bdose}, \code{chr2.bdose}, ... in \code{geno_dir}. If a
+#' model references a chromosome for which no matching genotype file exists,
+#' every SNP on that chromosome is reported as unmatched (with a warning)
+#' rather than causing an error.
 #'
-#' @param vcf_path   Path to the BGZF-compressed VCF (\code{.vcf.gz}).  A
-#'   matching \code{.tbi} Tabix index must exist alongside it.
+#' On Windows, VCF batches are queried in-process; on other platforms each VCF
+#' batch runs in its own \code{Rscript} subprocess to bound peak memory.
+#' BinaryDosage files are always queried in-process (random-access reads, no
+#' large sequential scan to isolate).
+#'
+#' @param geno_dir   Directory containing per-chromosome genotype files
+#'   (\code{chr<N>.vcf.gz}/\code{.tbi} or \code{chr<N>.bdose}/\code{.bdose.bdi}).
+#'   Defaults to the current working directory.
+#' @param format     \code{"vcf"} or \code{"bdose"} to force the genotype file
+#'   type; \code{NULL} (default) autodetects from what is present in
+#'   \code{geno_dir}. If both types are present and \code{format} is
+#'   \code{NULL}, BinaryDosage files are used and a message is printed.
 #' @param pgs_files  Character vector of paths to PGS Catalog scoring files
-#'   (\code{.txt.gz}).  If \code{NULL} (default), all files matching
+#'   (\code{.txt.gz}). If \code{NULL} (default), all files matching
 #'   \code{^PGS.*\\.txt\\.gz$} in \code{pgs_dir} are used.
 #' @param pgs_dir    Directory searched for PGS files when \code{pgs_files} is
-#'   \code{NULL}.  Defaults to the current working directory.
-#' @param chrom      Chromosome label to restrict scoring (e.g. \code{"21"}).
-#'   \code{NULL} (default) auto-detects from the VCF index; an error is raised
-#'   when the VCF contains more than one sequence and \code{chrom} is
-#'   \code{NULL}.
-#' @param batch_size Integer; positions per VCF query batch.  Default 10000.
-#' @param output_dir Directory in which to write one \code{.rds} file per model
-#'   named \code{pgs_chr<chrom>_<model>_prs_combined.rds}.  Set to \code{NULL}
-#'   to skip saving.  Defaults to the current working directory.
+#'   \code{NULL}. Defaults to the current working directory.
+#' @param batch_size Integer; positions per VCF query batch (ignored for
+#'   BinaryDosage input). Default 10000.
+#' @param output_dir Directory in which to write one \code{.rds} file per
+#'   model, named \code{pgs_<model>_prs.rds}. Set to \code{NULL} to skip
+#'   saving. Defaults to the current working directory.
 #' @param verbose    Logical; if \code{TRUE} (default) print progress and
 #'   summary messages.
 #'
-#' @return A named list of numeric vectors (invisibly), one element per model.
-#'   Each vector is named by sample identifier and contains the PRS value.
+#' @return A named list (invisibly), one element per model, each itself a list
+#'   with:
+#'   \describe{
+#'     \item{prs}{Named numeric vector of PRS values, one per sample.}
+#'     \item{unmatched_by_chr}{Named integer vector, one entry per chromosome
+#'       referenced by any model or found in \code{geno_dir}: the number of
+#'       this model's SNPs on that chromosome with no matching genotype
+#'       record (including every SNP on a chromosome with no genotype file).}
+#'     \item{unmatched_rsIDs}{Named list, one character vector of unmatched
+#'       rsIDs per chromosome (same chromosome set as \code{unmatched_by_chr}).}
+#'     \item{excluded_chr_counts}{Named integer vector, one entry per
+#'       chromosome: SNPs found in the genotype data but excluded because the
+#'       effect allele matched neither REF nor ALT.}
+#'   }
 #'
 #' @export
-compute_prs <- function(vcf_path,
+compute_prs <- function(geno_dir   = ".",
+                        format     = NULL,
                         pgs_files  = NULL,
                         pgs_dir    = ".",
-                        chrom      = NULL,
                         batch_size = 10000L,
                         output_dir = ".",
                         verbose    = TRUE) {
@@ -41,174 +64,246 @@ compute_prs <- function(vcf_path,
   stopifnot(
     "tabixr is not installed"          = requireNamespace("tabixr",     quietly = TRUE),
     "data.table is not installed"      = requireNamespace("data.table", quietly = TRUE),
-    "vcf_path must be a single string" = is.character(vcf_path) && length(vcf_path) == 1L,
-    "VCF file not found"               = file.exists(vcf_path),
-    ".tbi index not found"             = file.exists(paste0(vcf_path, ".tbi")),
-    "batch_size must be a positive integer" = is.numeric(batch_size) && batch_size >= 1L
+    "geno_dir does not exist"          = dir.exists(geno_dir),
+    "batch_size must be a positive integer" = is.numeric(batch_size) && batch_size >= 1L,
+    "format must be NULL, 'vcf', or 'bdose'" = is.null(format) || (is.character(format) && format %in% c("vcf", "bdose"))
   )
   batch_size <- as.integer(batch_size)
 
-  # ---- Discover PGS files ----------------------------------------------------
+  # ---- Discover PGS files -----------------------------------------------------
   if (is.null(pgs_files)) {
-    pgs_files <- sort(list.files(pgs_dir, pattern = "^PGS.*\\.txt\\.gz$",
-                                 full.names = TRUE))
+    pgs_files <- sort(list.files(pgs_dir, pattern = "^PGS.*\\.txt\\.gz$", full.names = TRUE))
     if (length(pgs_files) == 0L)
       stop(sprintf("No PGS model files (^PGS.*\\.txt\\.gz$) found in: %s", pgs_dir))
   } else {
     missing_pgs <- pgs_files[!file.exists(pgs_files)]
     if (length(missing_pgs) > 0L)
-      stop(sprintf("PGS file(s) not found:\n  %s",
-                   paste(missing_pgs, collapse = "\n  ")))
+      stop(sprintf("PGS file(s) not found:\n  %s", paste(missing_pgs, collapse = "\n  ")))
   }
   if (verbose) {
     cat(sprintf("Found %d PGS model file(s):\n", length(pgs_files)))
     cat(paste0("  ", basename(pgs_files), "\n"), sep = "")
   }
 
-  # ---- Detect chromosome -----------------------------------------------------
-  seqs <- tabixr::vcf_seqnames(vcf_path)
-  if (is.null(chrom)) {
-    if (length(seqs) == 1L) {
-      chrom <- seqs
-      if (verbose) cat(sprintf("Detected chromosome : %s\n", chrom))
-    } else {
-      stop(sprintf(
-        "VCF contains %d chromosomes (%s).\nSet chrom= to select one.",
-        length(seqs), paste(seqs, collapse = ", ")
-      ))
-    }
-  } else if (!chrom %in% seqs) {
-    stop(sprintf("chrom='%s' not found in VCF index.\nAvailable: %s",
-                 chrom, paste(seqs, collapse = ", ")))
+  # ---- Discover genotype files and resolve format -----------------------------
+  geno <- .discover_geno_files(geno_dir, format, verbose)
+  if (verbose) {
+    cat(sprintf("\nUsing %s genotype files from %s (%d chromosome(s) available):\n",
+                geno$format[1L], geno_dir, nrow(geno)))
+    cat(paste0("  chr", geno$chrom, "\n"), sep = "")
   }
 
-  # ---- Read PGS models -------------------------------------------------------
-  if (verbose) cat(sprintf("\nReading PGS models (chr%s only)...\n", chrom))
+  # ---- Read PGS models ----------------------------------------------------------
   model_ids <- sub("_.*", "", basename(pgs_files))
   pgs_list  <- setNames(vector("list", length(pgs_files)), model_ids)
-
   for (i in seq_along(pgs_files)) {
-    pgs           <- readPGSmodel(pgs_files[i], verbose = FALSE)
-    pgs           <- pgs[pgs$chr_name == chrom,
-                         c("chr_position", "effect_allele", "effect_weight")]
-    pgs_list[[i]] <- pgs
-    if (verbose) cat(sprintf("  %-12s : %d SNPs\n", model_ids[i], nrow(pgs)))
+    pgs <- readPGSmodel(pgs_files[i], verbose = FALSE)
+    pgs$chr_name <- .norm_chrom(pgs$chr_name)
+    pgs_list[[i]] <- pgs[, c("rsID", "chr_name", "chr_position", "effect_allele", "effect_weight")]
+    if (verbose) cat(sprintf("  %-12s : %d SNPs\n", model_ids[i], nrow(pgs_list[[i]])))
   }
 
-  # ---- Union positions -------------------------------------------------------
-  all_positions <- sort(unique(unlist(lapply(pgs_list, `[[`, "chr_position"))))
-  if (verbose)
-    cat(sprintf("\nUnique positions across all models : %d\n", length(all_positions)))
+  # ---- Determine every chromosome to account for -------------------------------
+  model_chroms <- unique(unlist(lapply(pgs_list, `[[`, "chr_name")))
+  all_chroms   <- .chrom_sort(unique(c(geno$chrom, model_chroms)))
+  needed_chroms <- .chrom_sort(model_chroms)   # only these are actually queried
 
-  # ---- Query VCF in batches --------------------------------------------------
-  batches   <- split(all_positions,
-                     ceiling(seq_along(all_positions) / batch_size))
-  n_batches <- length(batches)
+  missing_chroms <- setdiff(needed_chroms, geno$chrom)
+  for (chrom in missing_chroms)
+    warning(sprintf("No genotype file found for chromosome %s - all SNPs on chr%s will be treated as unmatched.",
+                    chrom, chrom))
 
-  use_subprocess <- .Platform$OS.type != "windows"
-  if (verbose) {
-    mode_label <- if (use_subprocess) "subprocess per batch" else "in-process"
-    cat(sprintf("Querying VCF in %d batch(es) of up to %d positions (%s)...\n",
-                n_batches, batch_size, mode_label))
+  # ---- Sample IDs (for initialising per-model PRS accumulators) ---------------
+  all_samples <- .geno_sample_ids(geno[1L, ])
+
+  # ---- Per-model accumulators ----------------------------------------------------
+  zero_chrom_vec <- setNames(integer(length(all_chroms)), all_chroms)
+  empty_rsid_list <- setNames(vector("list", length(all_chroms)), all_chroms)
+  for (nm in names(empty_rsid_list)) empty_rsid_list[[nm]] <- character(0)
+
+  prs_total           <- setNames(vector("list", length(pgs_list)), model_ids)
+  unmatched_by_chr     <- setNames(rep(list(zero_chrom_vec),  length(pgs_list)), model_ids)
+  unmatched_rsIDs      <- setNames(rep(list(empty_rsid_list), length(pgs_list)), model_ids)
+  excluded_chr_counts  <- setNames(rep(list(zero_chrom_vec),  length(pgs_list)), model_ids)
+
+  for (i in seq_along(pgs_list)) prs_total[[i]] <- setNames(numeric(length(all_samples)), all_samples)
+
+  # ---- Missing-chromosome SNPs are entirely unmatched --------------------------
+  for (chrom in missing_chroms) {
+    for (m in model_ids) {
+      snps_m <- pgs_list[[m]][pgs_list[[m]]$chr_name == chrom, ]
+      if (nrow(snps_m) == 0L) next
+      unmatched_by_chr[[m]][chrom]  <- nrow(snps_m)
+      unmatched_rsIDs[[m]][[chrom]] <- snps_m$rsID
+    }
   }
 
-  t_vcf_start <- proc.time()[["elapsed"]]
-  dosage_all  <- if (use_subprocess)
-    .query_batches_subprocess(vcf_path, chrom, batches, verbose)
-  else
-    .query_batches_inprocess(vcf_path, chrom, batches, verbose)
-  t_vcf <- proc.time()[["elapsed"]] - t_vcf_start
+  # ---- Score chromosome by chromosome -------------------------------------------
+  t_start <- proc.time()[["elapsed"]]
 
-  heap_mb <- function() { g <- gc(verbose = FALSE); sum(g[, "used"]) * 8 / 1e6 }
-  if (verbose)
-    cat(sprintf("VCF query complete : %.1f s  |  %d dosage row(s)  |  %.1f MB heap\n",
-                t_vcf, nrow(dosage_all), heap_mb()))
+  for (chrom in setdiff(needed_chroms, missing_chroms)) {
+    geno_row     <- geno[geno$chrom == chrom, ]
+    models_here  <- model_ids[vapply(pgs_list, function(p) any(p$chr_name == chrom), logical(1L))]
 
-  # ---- Score each model ------------------------------------------------------
-  fixed_cols    <- c("POS", "ID", "REF", "ALT")
-  samp_cols     <- setdiff(names(dosage_all), fixed_cols)
-  summary_rows  <- vector("list", length(pgs_list))
-  prs_list      <- setNames(vector("list", length(pgs_list)), model_ids)
-  t_score_start <- proc.time()[["elapsed"]]
+    positions <- sort(unique(unlist(lapply(pgs_list[models_here], function(p) p$chr_position[p$chr_name == chrom]))))
+    if (verbose)
+      cat(sprintf("\n--- chr%s : %d unique position(s) across %d model(s) ---\n",
+                  chrom, length(positions), length(models_here)))
 
-  for (i in seq_along(pgs_list)) {
-    model_id <- model_ids[i]
-    pgs      <- pgs_list[[i]]
-    if (verbose) cat(sprintf("\n--- %s ---\n", model_id))
-
-    merged <- merge(dosage_all, pgs,
-                    by.x = "POS", by.y = "chr_position", sort = FALSE)
-
-    is_ref    <- merged$effect_allele == merged$REF
-    is_alt    <- merged$effect_allele == merged$ALT
-    n_neither <- sum(!is_ref & !is_alt)
-    n_matched <- nrow(merged)
-    if (n_neither > 0L)
-      message(sprintf("  WARNING: %d row(s) where effect_allele matches neither REF nor ALT — excluded.",
-                      n_neither))
-    merged <- merged[is_ref | is_alt, ]
-    is_ref <- merged$effect_allele == merged$REF
-
-    # REF-effect formula: weight * (2 - dosage) = -weight * dosage + 2 * weight
-    adj_weight     <- ifelse(is_ref, -merged$effect_weight, merged$effect_weight)
-    ref_correction <- 2 * sum(merged$effect_weight[is_ref])
-
-    dos_mat    <- as.matrix(merged[, samp_cols])
-    prs        <- drop(t(dos_mat) %*% adj_weight) + ref_correction
-    names(prs) <- samp_cols
-
-    if (verbose) {
-      cat(sprintf("  Model SNPs    : %d\n", nrow(pgs)))
-      cat(sprintf("  VCF rows      : %d\n", n_matched))
-      cat(sprintf("  Excluded      : %d\n", n_neither))
-      cat(sprintf("  Scored        : %d\n", nrow(merged)))
-      cat(sprintf("  REF-effect    : %d\n", sum(is_ref)))
-      cat(sprintf("  ALT-effect    : %d\n", sum(!is_ref)))
+    dosage_chrom <- if (geno_row$format[1L] == "vcf") {
+      .query_vcf_dosage(geno_row$path[1L], paste0("chr", chrom), positions, batch_size, verbose)
+    } else {
+      .query_bd_dosage(geno_row$path[1L], positions, verbose)
     }
 
-    prs_list[[i]]     <- prs
-    summary_rows[[i]] <- data.frame(
-      model      = model_id,
-      model_snps = nrow(pgs),
-      matched    = nrow(merged),
-      ref_effect = sum(is_ref),
-      alt_effect = sum(!is_ref),
-      subjects   = length(prs),
-      stringsAsFactors = FALSE
+    for (m in models_here) {
+      snps_m <- pgs_list[[m]][pgs_list[[m]]$chr_name == chrom, ]
+
+      if (is.null(dosage_chrom) || nrow(dosage_chrom) == 0L) {
+        unmatched_by_chr[[m]][chrom]  <- nrow(snps_m)
+        unmatched_rsIDs[[m]][[chrom]] <- snps_m$rsID
+        next
+      }
+
+      found_pos      <- snps_m$chr_position %in% dosage_chrom$POS
+      unmatched_by_chr[[m]][chrom]  <- sum(!found_pos)
+      unmatched_rsIDs[[m]][[chrom]] <- snps_m$rsID[!found_pos]
+      snps_found <- snps_m[found_pos, ]
+      if (nrow(snps_found) == 0L) next
+
+      merged <- merge(dosage_chrom, snps_found,
+                      by.x = "POS", by.y = "chr_position", sort = FALSE)
+
+      is_ref    <- merged$effect_allele == merged$REF
+      is_alt    <- merged$effect_allele == merged$ALT
+      n_neither <- sum(!is_ref & !is_alt)
+      excluded_chr_counts[[m]][chrom] <- n_neither
+      merged <- merged[is_ref | is_alt, ]
+      if (nrow(merged) == 0L) next
+      is_ref <- merged$effect_allele == merged$REF
+
+      samp_cols <- setdiff(names(dosage_chrom), c("POS", "ID", "REF", "ALT"))
+
+      # REF-effect formula: weight * (2 - dosage) = -weight * dosage + 2 * weight
+      adj_weight     <- ifelse(is_ref, -merged$effect_weight, merged$effect_weight)
+      ref_correction <- 2 * sum(merged$effect_weight[is_ref])
+
+      dos_mat     <- as.matrix(merged[, samp_cols, drop = FALSE])
+      prs_chrom   <- drop(t(dos_mat) %*% adj_weight) + ref_correction
+      names(prs_chrom) <- samp_cols
+
+      idx <- match(names(prs_chrom), names(prs_total[[m]]))
+      prs_total[[m]][idx] <- prs_total[[m]][idx] + prs_chrom
+
+      if (verbose) {
+        cat(sprintf("  %-12s : %d matched, %d excluded (allele mismatch), %d unmatched\n",
+                    m, nrow(merged), n_neither, sum(!found_pos)))
+      }
+    }
+  }
+
+  t_elapsed <- proc.time()[["elapsed"]] - t_start
+  if (verbose) cat(sprintf("\nScoring complete : %.1f s\n", t_elapsed))
+
+  # ---- Assemble return value and save -------------------------------------------
+  results <- setNames(vector("list", length(pgs_list)), model_ids)
+  for (m in model_ids) {
+    results[[m]] <- list(
+      prs                 = prs_total[[m]],
+      unmatched_by_chr    = unmatched_by_chr[[m]],
+      unmatched_rsIDs     = unmatched_rsIDs[[m]],
+      excluded_chr_counts = excluded_chr_counts[[m]]
     )
   }
 
-  t_score <- proc.time()[["elapsed"]] - t_score_start
-
-  # ---- Summary ---------------------------------------------------------------
-  if (verbose) {
-    cat(sprintf("\n=== Timing ===\n"))
-    cat(sprintf("VCF query : %.1f s\n", t_vcf))
-    cat(sprintf("Scoring   : %.1f s\n", t_score))
-    cat(sprintf("Total     : %.1f s\n", t_vcf + t_score))
-    cat("\n")
-    print(do.call(rbind, summary_rows), row.names = FALSE)
-  }
-
-  # ---- Save results ----------------------------------------------------------
   if (!is.null(output_dir)) {
-    if (verbose) cat("\n")
-    for (i in seq_along(prs_list)) {
-      out_file <- file.path(
-        output_dir,
-        sprintf("pgs_chr%s_%s_prs_combined.rds", chrom, model_ids[i])
-      )
-      saveRDS(prs_list[[i]], out_file)
+    for (m in model_ids) {
+      out_file <- file.path(output_dir, sprintf("pgs_%s_prs.rds", m))
+      saveRDS(results[[m]], out_file)
       if (verbose) cat(sprintf("Saved : %s\n", out_file))
     }
   }
 
-  invisible(prs_list)
+  invisible(results)
 }
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+# Strip a leading "chr" (case-insensitive) and coerce to character.
+.norm_chrom <- function(x) {
+  sub("^chr", "", as.character(x), ignore.case = TRUE)
+}
+
+# Sort chromosome labels: numeric ones in numeric order, then the rest
+# alphabetically (X, Y, MT, ...).
+.chrom_sort <- function(chroms) {
+  chroms   <- unique(chroms)
+  num      <- suppressWarnings(as.integer(chroms))
+  is_num   <- !is.na(num)
+  c(chroms[is_num][order(num[is_num])], sort(chroms[!is_num]))
+}
+
+# Discover per-chromosome genotype files in geno_dir and resolve which format
+# to use. Returns a data.frame(chrom, path, format).
+.discover_geno_files <- function(geno_dir, format, verbose) {
+  chrom_pat   <- "([0-9]+|X|Y|MT)"
+  vcf_files   <- list.files(geno_dir, pattern = paste0("^chr", chrom_pat, "\\.vcf\\.gz$"),
+                            full.names = TRUE)
+  bdose_files <- list.files(geno_dir, pattern = paste0("^chr", chrom_pat, "\\.bdose$"),
+                            full.names = TRUE)
+  has_vcf   <- length(vcf_files)   > 0L
+  has_bdose <- length(bdose_files) > 0L
+
+  if (!is.null(format)) {
+    chosen <- format
+    if (chosen == "vcf"   && !has_vcf)
+      stop(sprintf("format='vcf' requested but no chr*.vcf.gz files found in %s", geno_dir))
+    if (chosen == "bdose" && !has_bdose)
+      stop(sprintf("format='bdose' requested but no chr*.bdose files found in %s", geno_dir))
+  } else if (has_vcf && has_bdose) {
+    chosen <- "bdose"
+    if (verbose)
+      cat(sprintf("Both VCF and BinaryDosage genotype files found in %s - using BinaryDosage.\n", geno_dir))
+  } else if (has_bdose) {
+    chosen <- "bdose"
+  } else if (has_vcf) {
+    chosen <- "vcf"
+  } else {
+    stop(sprintf("No genotype files (chr*.vcf.gz or chr*.bdose) found in %s", geno_dir))
+  }
+
+  files   <- if (chosen == "vcf") vcf_files else bdose_files
+  ext_pat <- if (chosen == "vcf") "\\.vcf\\.gz$" else "\\.bdose$"
+  chrom   <- .norm_chrom(sub(ext_pat, "", basename(files)))
+
+  data.frame(chrom = chrom, path = files, format = chosen, stringsAsFactors = FALSE)
+}
+
+# Sample IDs available in a single geno data.frame row (one file).
+.geno_sample_ids <- function(geno_row) {
+  if (geno_row$format[1L] == "vcf") {
+    tabixr::vcf_samples(geno_row$path[1L])
+  } else {
+    stopifnot("BinaryDosage is not installed" = requireNamespace("BinaryDosage", quietly = TRUE))
+    BinaryDosage::getbdinfo(bdfiles = geno_row$path[1L])$samples$sid
+  }
+}
+
+# ---- VCF dosage retrieval (batched; subprocess-isolated off Windows) --------
+
+.query_vcf_dosage <- function(vcf_path, chrom_internal, positions, batch_size, verbose) {
+  if (length(positions) == 0L) return(NULL)
+  batches <- split(positions, ceiling(seq_along(positions) / batch_size))
+
+  dosage_all <- if (.Platform$OS.type != "windows")
+    .query_batches_subprocess(vcf_path, chrom_internal, batches, verbose)
+  else
+    .query_batches_inprocess(vcf_path, chrom_internal, batches, verbose)
+
+  dosage_all
+}
 
 .query_batches_inprocess <- function(vcf_path, chrom, batches, verbose) {
   n_batches  <- length(batches)
@@ -224,10 +319,10 @@ compute_prs <- function(vcf_path,
     rm(vcf_hits)
 
     if (nrow(matched) == 0L) {
-      if (verbose) cat(" — 0 hits\n")
+      if (verbose) cat(" - 0 hits\n")
       next
     }
-    if (verbose) cat(sprintf(" — %d VCF row(s)\n", nrow(matched)))
+    if (verbose) cat(sprintf(" - %d VCF row(s)\n", nrow(matched)))
 
     dos        <- extract_dosage(matched)
     rm(matched)
@@ -252,8 +347,7 @@ compute_prs <- function(vcf_path,
 
     saveRDS(batches[[b]], pos_rds)
     if (verbose)
-      cat(sprintf("  Batch %d/%d : %d positions\n",
-                  b, n_batches, length(batches[[b]])))
+      cat(sprintf("  Batch %d/%d : %d positions\n", b, n_batches, length(batches[[b]])))
 
     status <- system2(
       rscript,
@@ -267,8 +361,41 @@ compute_prs <- function(vcf_path,
 
   dosage_parts <- Filter(Negate(is.null), lapply(batch_dos_files, readRDS))
   for (f in batch_dos_files) if (file.exists(f)) file.remove(f)
-  dosage_all <- do.call(rbind, dosage_parts)
+  dosage_all <- if (length(dosage_parts) > 0L) do.call(rbind, dosage_parts) else NULL
   rm(dosage_parts)
   invisible(gc())
   dosage_all
+}
+
+# ---- BinaryDosage dosage retrieval (in-process, random-access by SNP) -------
+
+.query_bd_dosage <- function(bdose_path, positions, verbose) {
+  if (length(positions) == 0L) return(NULL)
+  stopifnot("BinaryDosage is not installed" = requireNamespace("BinaryDosage", quietly = TRUE))
+
+  bdinfo <- BinaryDosage::getbdinfo(bdfiles = bdose_path)
+  snps   <- bdinfo$snps
+  idx    <- which(snps$location %in% positions)
+
+  if (verbose)
+    cat(sprintf("  %d/%d SNP(s) in %s match requested positions\n",
+                length(idx), nrow(snps), basename(bdose_path)))
+  if (length(idx) == 0L) return(NULL)
+
+  samp_ids <- bdinfo$samples$sid
+  dos_mat  <- t(vapply(idx, function(i) {
+    BinaryDosage::getsnp(bdinfo, i, dosageonly = TRUE)$dosage
+  }, FUN.VALUE = numeric(length(samp_ids))))
+  colnames(dos_mat) <- samp_ids
+
+  cbind(
+    data.frame(
+      POS = snps$location[idx],
+      ID  = snps$snpid[idx],
+      REF = snps$reference[idx],
+      ALT = snps$alternate[idx],
+      stringsAsFactors = FALSE
+    ),
+    as.data.frame(dos_mat, stringsAsFactors = FALSE)
+  )
 }
