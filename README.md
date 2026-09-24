@@ -1,8 +1,8 @@
 # pgscorer
 
-An R package for computing Polygenic Risk Scores (PRS) from [PGS Catalog](https://www.pgscatalog.org/) scoring files against a BGZF-compressed VCF file.
+An R package for computing Polygenic Risk Scores (PRS) from [PGS Catalog](https://www.pgscatalog.org/) scoring files against per-chromosome genotype files, in either BGZF/Tabix VCF or [BinaryDosage](https://cran.r-project.org/package=BinaryDosage) format.
 
-The package unions SNP positions across all models, queries the VCF once per position in batches, and scores every model from the shared dosage table. On **Windows** batches run in-process; on **Linux/macOS** each batch runs in an isolated `Rscript` subprocess to keep peak memory bounded to one batch at a time.
+Each PGS model may span any number of chromosomes. `compute_prs()` reads all requested models, determines which chromosomes they need, and — for each chromosome — unions positions across every model that touches it, queries the matching genotype file once, and scores all of those models from the shared dosage table. On **Windows**, VCF batches run in-process; on **Linux/macOS** each VCF batch runs in an isolated `Rscript` subprocess to keep peak memory bounded to one batch at a time. BinaryDosage files are always queried in-process (random-access reads, no large sequential scan to isolate).
 
 ## Installation
 
@@ -14,6 +14,7 @@ remotes::install_github("USCbiostats/pgscorer")
 
 - [tabixr](https://github.com/USCbiostats/tabixr) (Bioconductor) — BGZF/Tabix VCF queries
 - [data.table](https://cran.r-project.org/package=data.table) — fast PGS file reading
+- [BinaryDosage](https://cran.r-project.org/package=BinaryDosage) (CRAN) — only required when scoring against `.bdose` files
 
 ## Usage
 
@@ -21,7 +22,8 @@ remotes::install_github("USCbiostats/pgscorer")
 library(pgscorer)
 
 results <- compute_prs(
-  vcf_path   = "path/to/genotypes.vcf.gz",
+  geno_dir   = "path/to/genotypes",   # directory of chr1.vcf.gz, chr2.vcf.gz, ... OR chr1.bdose, chr2.bdose, ...
+  format     = NULL,                  # NULL = autodetect; "vcf" or "bdose" to force
   pgs_files  = c("PGS002164_hmPOS_GRCh37.txt.gz",
                  "PGS002863_hmPOS_GRCh37.txt.gz"),
   batch_size = 10000L,
@@ -31,38 +33,53 @@ results <- compute_prs(
 
 If `pgs_files` is omitted, all files matching `^PGS.*\.txt\.gz$` in the current directory (or `pgs_dir`) are used automatically.
 
-`compute_prs()` returns a named list of numeric vectors — one element per model, named by sample identifier.
+`compute_prs()` returns a named list (invisibly), one element per model, each itself a list:
+
+```r
+results$PGS002164$prs                  # named numeric vector of PRS values, one per sample
+results$PGS002164$unmatched_by_chr     # named integer vector: unmatched SNP count per chromosome
+results$PGS002164$unmatched_rsIDs      # named list: unmatched rsIDs per chromosome
+results$PGS002164$excluded_chr_counts  # named integer vector: allele-mismatch exclusions per chromosome
+```
 
 ### Arguments
 
 | Argument | Default | Description |
 |---|---|---|
-| `vcf_path` | — | Path to `.vcf.gz` file (`.tbi` index must exist alongside it) |
+| `geno_dir` | `"."` | Directory containing per-chromosome genotype files: `chr<N>.vcf.gz` (with `.tbi` alongside) or `chr<N>.bdose` (with `.bdose.bdi` alongside) |
+| `format` | `NULL` | `"vcf"` or `"bdose"` to force the genotype file type; `NULL` = autodetect from what's in `geno_dir`. If both types are present, BinaryDosage is used and a message is printed |
 | `pgs_files` | `NULL` | Character vector of PGS Catalog scoring file paths; `NULL` = auto-discover in `pgs_dir` |
 | `pgs_dir` | `"."` | Directory searched for PGS files when `pgs_files` is `NULL` |
-| `chrom` | `NULL` | Chromosome label (e.g. `"21"`); `NULL` = auto-detect from the `.tbi` index |
-| `batch_size` | `10000L` | Positions per VCF query batch |
+| `batch_size` | `10000L` | Positions per VCF query batch (ignored for BinaryDosage input) |
 | `output_dir` | `"."` | Directory for output `.rds` files; `NULL` = do not save |
 | `verbose` | `TRUE` | Print progress and summary |
+
+A model may reference a chromosome for which no matching genotype file exists in `geno_dir`. Rather than erroring, every SNP on that chromosome is reported as unmatched (in `unmatched_by_chr` / `unmatched_rsIDs`) and a warning is printed.
 
 ### Output files
 
 When `output_dir` is not `NULL`, one RDS file is written per model:
 
 ```
-pgs_chr<chrom>_<model>_prs_combined.rds
+pgs_<model>_prs.rds
 ```
 
-Each file contains a named numeric vector of PRS values indexed by sample ID.
+Each file contains that model's full result list (`prs`, `unmatched_by_chr`, `unmatched_rsIDs`, `excluded_chr_counts`), not just the PRS vector.
 
 ## PGS Catalog file format
 
 Scoring files should be downloaded directly from [pgscatalog.org](https://www.pgscatalog.org/) in the standard tab-delimited `.txt.gz` format. Harmonised position columns (`hm_chr`, `hm_pos`) are preferred over raw columns (`chr_name`, `chr_position`) when both are present.
 
-## VCF requirements
+## Genotype file requirements
 
+Genotype files are discovered by name in `geno_dir`: `chr1.vcf.gz`, `chr2.vcf.gz`, ... or `chr1.bdose`, `chr2.bdose`, ... (chromosome labels `1`–`22`, `X`, `Y`, `MT`).
+
+**VCF:**
 - BGZF-compressed (`.vcf.gz`) with a Tabix index (`.vcf.gz.tbi`)
 - Must contain a `DS` (dosage) field in the `FORMAT` column
+
+**BinaryDosage:**
+- Format 5 (`.bdose` + companion `.bdose.bdi`), e.g. as produced by `BinaryDosage::vcftobd()`
 
 ## Allele effect formula
 
@@ -78,7 +95,7 @@ For SNPs where the effect allele matches `ALT`:
 PRS contribution = weight × dosage
 ```
 
-Rows where the effect allele matches neither `REF` nor `ALT` are excluded with a warning.
+Rows where the effect allele matches neither `REF` nor `ALT` are excluded from the score and counted per chromosome in `excluded_chr_counts`.
 
 ## License
 
