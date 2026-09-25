@@ -60,8 +60,13 @@
 #'   \code{^PGS.*\\.txt\\.gz$} in \code{pgs_dir} are used.
 #' @param pgs_dir    Directory searched for PGS files when \code{pgs_files} is
 #'   \code{NULL}. Defaults to the current working directory.
-#' @param batch_size Integer; positions per VCF query batch (ignored for
-#'   BinaryDosage input). Default 10000.
+#' @param batch_size Integer; the maximum number of positions read and scored
+#'   at a time, for both VCF and BinaryDosage input. Memory use is roughly
+#'   proportional to \code{batch_size} times the number of samples, so lower it
+#'   if memory is short and raise it for speed. \code{NULL} (default) chooses
+#'   a value from the number of samples so that about 250 MB of dosage data is
+#'   held at once (at most 10000 positions); with 139,000 samples that is about
+#'   100 positions per batch for BinaryDosage and 15 for VCF.
 #' @param output_dir Directory in which to write one \code{.rds} file per
 #'   model, named \code{pgs_<model>_prs.rds}. Set to \code{NULL} to skip
 #'   saving. Defaults to the current working directory.
@@ -92,7 +97,7 @@ compute_prs <- function(geno_dir   = ".",
                         format     = NULL,
                         pgs_files  = NULL,
                         pgs_dir    = ".",
-                        batch_size = 10000L,
+                        batch_size = NULL,
                         output_dir = ".",
                         verbose    = TRUE) {
 
@@ -100,10 +105,11 @@ compute_prs <- function(geno_dir   = ".",
     "tabixr is not installed"          = requireNamespace("tabixr",     quietly = TRUE),
     "data.table is not installed"      = requireNamespace("data.table", quietly = TRUE),
     "geno_dir does not exist"          = dir.exists(geno_dir),
-    "batch_size must be a positive integer" = is.numeric(batch_size) && batch_size >= 1L,
+    "batch_size must be NULL or a positive integer" =
+      is.null(batch_size) || (is.numeric(batch_size) && length(batch_size) == 1L && batch_size >= 1L),
     "format must be NULL, 'vcf', or 'bdose'" = is.null(format) || (is.character(format) && format %in% c("vcf", "bdose"))
   )
-  batch_size <- as.integer(batch_size)
+  if (!is.null(batch_size)) batch_size <- as.integer(batch_size)
 
   # ---- Discover PGS files -----------------------------------------------------
   if (is.null(pgs_files)) {
@@ -194,53 +200,42 @@ compute_prs <- function(geno_dir   = ".",
       cat(sprintf("\n--- chr%s : %d unique position(s) across %d model(s) ---\n",
                   chrom, length(positions), length(models_here)))
 
-    dosage_chrom <- if (geno_row$format[1L] == "vcf") {
-      .query_vcf_dosage(geno_row$path[1L], geno_row$contig[1L], positions, batch_size, verbose)
-    } else {
-      .query_bd_dosage(geno_row$path[1L], geno_row$contig[1L], positions, verbose)
+    # Dosage is streamed in bounded chunks and each chunk's contribution is added
+    # to the running scores, so memory does not grow with the number of SNPs.
+    snps_here  <- lapply(pgs_list[models_here], function(p) p[p$chr_name == chrom, ])
+    n_matched  <- setNames(integer(length(models_here)), models_here)
+    n_excluded <- n_matched
+    seen_pos   <- integer(0)
+
+    next_chunk <- .open_chunk_reader(
+      geno_row, positions, scoring_samples,
+      .resolve_batch_size(batch_size, length(scoring_samples), geno_row$format[1L]), verbose)
+
+    while (!is.null(chunk <- next_chunk())) {
+      seen_pos <- c(seen_pos, chunk$meta$POS)
+
+      for (m in models_here) {
+        scored <- .score_chunk(chunk, snps_here[[m]])
+        if (is.null(scored)) next
+        n_excluded[m]  <- n_excluded[m] + scored$n_neither
+        n_matched[m]   <- n_matched[m]  + scored$n_scored
+        if (scored$n_scored > 0L)
+          prs_total[[m]] <- prs_total[[m]] + scored$prs
+      }
+      rm(chunk)
     }
+    seen_pos <- unique(seen_pos)
 
     for (m in models_here) {
-      snps_m <- pgs_list[[m]][pgs_list[[m]]$chr_name == chrom, ]
-
-      if (is.null(dosage_chrom) || nrow(dosage_chrom) == 0L) {
-        unmatched_by_chr[[m]][chrom]  <- nrow(snps_m)
-        unmatched_rsIDs[[m]][[chrom]] <- snps_m$rsID
-        next
-      }
-
-      found_pos      <- snps_m$chr_position %in% dosage_chrom$POS
-      unmatched_by_chr[[m]][chrom]  <- sum(!found_pos)
-      unmatched_rsIDs[[m]][[chrom]] <- snps_m$rsID[!found_pos]
-      snps_found <- snps_m[found_pos, ]
-      if (nrow(snps_found) == 0L) next
-
-      merged <- merge(dosage_chrom, snps_found,
-                      by.x = "POS", by.y = "chr_position", sort = FALSE)
-
-      is_ref    <- merged$effect_allele == merged$REF
-      is_alt    <- merged$effect_allele == merged$ALT
-      n_neither <- sum(!is_ref & !is_alt)
-      excluded_chr_counts[[m]][chrom] <- n_neither
-      merged <- merged[is_ref | is_alt, ]
-      if (nrow(merged) == 0L) next
-      is_ref <- merged$effect_allele == merged$REF
-
-      # REF-effect formula: weight * (2 - dosage) = -weight * dosage + 2 * weight
-      adj_weight     <- ifelse(is_ref, -merged$effect_weight, merged$effect_weight)
-      ref_correction <- 2 * sum(merged$effect_weight[is_ref])
-
-      # Only the samples common to every file; columns are in scoring_samples order,
-      # so this chromosome's scores line up with the running totals.
-      dos_mat     <- as.matrix(merged[, scoring_samples, drop = FALSE])
-      prs_chrom   <- drop(t(dos_mat) %*% adj_weight) + ref_correction
-      prs_total[[m]] <- prs_total[[m]] + prs_chrom
-
-      if (verbose) {
+      found_pos <- snps_here[[m]]$chr_position %in% seen_pos
+      unmatched_by_chr[[m]][chrom]     <- sum(!found_pos)
+      unmatched_rsIDs[[m]][[chrom]]    <- snps_here[[m]]$rsID[!found_pos]
+      excluded_chr_counts[[m]][chrom]  <- n_excluded[[m]]
+      if (verbose)
         cat(sprintf("  %-12s : %d matched, %d excluded (allele mismatch), %d unmatched\n",
-                    m, nrow(merged), n_neither, sum(!found_pos)))
-      }
+                    m, n_matched[[m]], n_excluded[[m]], sum(!found_pos)))
     }
+    invisible(gc())   # give memory back between chromosomes (matters under a memory limit)
   }
 
   t_elapsed <- proc.time()[["elapsed"]] - t_start
@@ -374,9 +369,13 @@ compute_prs <- function(geno_dir   = ".",
   if (any(is.na(contigs) | !nzchar(contigs)))
     stop(sprintf("BinaryDosage file %s has SNPs with no chromosome recorded", path), call. = FALSE)
   version <- bdinfo$additionalinfo$format
-  list(contigs = contigs, samples = as.character(bdinfo$samples$sid),
-       info = attr(bdinfo, "info_source"),
-       version = if (is.null(version)) NA_integer_ else as.integer(version))
+  out <- list(contigs = contigs, samples = as.character(bdinfo$samples$sid),
+              info = attr(bdinfo, "info_source"),
+              version = if (is.null(version)) NA_integer_ else as.integer(version))
+  # The header of a large cohort is big; release it now rather than letting it pile up
+  # while the remaining files are read (matters under a memory limit).
+  rm(bdinfo); invisible(gc())
+  out
 }
 
 # Discover genotype files in geno_dir, resolve which format to use, and work
@@ -475,113 +474,156 @@ compute_prs <- function(geno_dir   = ".",
   list(common = common, excluded = excluded)
 }
 
-# ---- VCF dosage retrieval (batched; subprocess-isolated off Windows) --------
+# ---- Chunked dosage retrieval and scoring ------------------------------------
+#
+# Memory must not grow with the number of SNPs: with ~140,000 samples a single
+# SNP is ~1.1 MB of doubles, so a whole chromosome of a large model cannot be
+# held at once (and merging/reshaping makes several copies of it). Instead a
+# "chunk reader" hands out a bounded number of SNPs at a time, each chunk's
+# contribution is added to the running scores, and the chunk is discarded.
+#
+# A chunk reader is a function returning successive chunks and then NULL. A
+# chunk is list(meta = data.frame(POS, REF, ALT), D = numeric matrix with one
+# row per sample (in scoring_samples order) and one column per SNP of meta).
 
-.query_vcf_dosage <- function(vcf_path, chrom_internal, positions, batch_size, verbose) {
-  if (length(positions) == 0L) return(NULL)
-  batches <- split(positions, ceiling(seq_along(positions) / batch_size))
+# Positions per chunk. An explicit batch_size wins; otherwise size the chunk so
+# it holds about budget_mb of dosage data. VCF is far more expensive per cell
+# because tabixr returns text (~100 bytes per genotype string in R); BinaryDosage
+# chunks are doubles (8 bytes) plus headroom for the list they are built from.
+.resolve_batch_size <- function(batch_size, n_samples, format, budget_mb = 250) {
+  if (!is.null(batch_size)) return(as.integer(batch_size))
+  bytes_per_cell <- if (format == "vcf") 100 else 16
+  as.integer(max(1, min(10000, floor(budget_mb * 1e6 / (bytes_per_cell * max(1, n_samples))))))
+}
 
-  dosage_all <- if (.Platform$OS.type != "windows")
-    .query_batches_subprocess(vcf_path, chrom_internal, batches, verbose)
+.open_chunk_reader <- function(geno_row, positions, scoring_samples, batch_size, verbose) {
+  if (length(positions) == 0L) return(function() NULL)
+  if (geno_row$format[1L] == "vcf")
+    .vcf_chunk_reader(geno_row$path[1L], geno_row$contig[1L], positions, scoring_samples, batch_size, verbose)
   else
-    .query_batches_inprocess(vcf_path, chrom_internal, batches, verbose)
-
-  dosage_all
+    .bd_chunk_reader(geno_row$path[1L], geno_row$contig[1L], positions, scoring_samples, batch_size, verbose)
 }
 
-.query_batches_inprocess <- function(vcf_path, chrom, batches, verbose) {
-  n_batches  <- length(batches)
-  dosage_all <- NULL
-  # tabixr's data.frame can rename sample columns ("1001" -> "X1001"); the header has the true IDs.
-  sample_ids <- tabixr::vcf_samples(vcf_path)
+# Contribution of one chunk to one model's scores.
+# 'snps' holds the model's SNPs on the chunk's chromosome (chr_position,
+# effect_allele, effect_weight). Returns NULL if the chunk holds none of them,
+# else list(n_neither, n_scored, prs) where prs is NULL if nothing could be
+# scored. A dosage row may match several rows of the model (repeated variants,
+# multi-allelic sites), so weights are summed per dosage row before multiplying.
+.score_chunk <- function(chunk, snps) {
+  hit <- which(chunk$meta$POS %in% snps$chr_position)
+  if (length(hit) == 0L) return(NULL)
 
-  for (b in seq_along(batches)) {
-    batch_pos <- batches[[b]]
-    if (verbose)
-      cat(sprintf("  Batch %d/%d : %d positions", b, n_batches, length(batch_pos)))
+  merged <- merge(
+    data.frame(row = hit, POS = chunk$meta$POS[hit], REF = chunk$meta$REF[hit],
+               ALT = chunk$meta$ALT[hit], stringsAsFactors = FALSE),
+    snps[, c("chr_position", "effect_allele", "effect_weight")],
+    by.x = "POS", by.y = "chr_position", sort = FALSE
+  )
 
-    vcf_hits <- tabixr::query_vcf_positions(vcf_path, chrom, batch_pos)
-    matched  <- vcf_hits[vcf_hits$POS %in% batch_pos, ]
-    rm(vcf_hits)
+  has_ea    <- !is.na(merged$effect_allele)
+  is_ref    <- has_ea & merged$effect_allele == merged$REF
+  is_alt    <- has_ea & merged$effect_allele == merged$ALT
+  n_neither <- sum(!is_ref & !is_alt)
+  keep      <- is_ref | is_alt
+  merged    <- merged[keep, , drop = FALSE]
+  is_ref    <- is_ref[keep]
+  if (nrow(merged) == 0L) return(list(n_neither = n_neither, n_scored = 0L, prs = NULL))
 
-    if (nrow(matched) == 0L) {
-      if (verbose) cat(" - 0 hits\n")
-      next
-    }
-    if (verbose) cat(sprintf(" - %d VCF row(s)\n", nrow(matched)))
+  # REF-effect formula: weight * (2 - dosage) = -weight * dosage + 2 * weight
+  adj_weight     <- ifelse(is_ref, -merged$effect_weight, merged$effect_weight)
+  ref_correction <- 2 * sum(merged$effect_weight[is_ref])
 
-    dos        <- extract_dosage(matched, sample_ids)
-    rm(matched)
-    dosage_all <- if (is.null(dosage_all)) dos else rbind(dosage_all, dos)
-    rm(dos)
-  }
+  by_row <- rowsum(adj_weight, merged$row)
+  w      <- numeric(ncol(chunk$D))
+  w[as.integer(rownames(by_row))] <- by_row[, 1L]
 
-  dosage_all
+  list(n_neither = n_neither, n_scored = nrow(merged),
+       prs = drop(chunk$D %*% w) + ref_correction)
 }
 
-.query_batches_subprocess <- function(vcf_path, chrom, batches, verbose) {
-  n_batches       <- length(batches)
-  batch_dos_files <- character(n_batches)
-  tmp             <- tempdir()
-  worker_script   <- system.file("extdata", "batch_worker.R", package = "pgscorer")
-  rscript         <- file.path(R.home("bin"), "Rscript")
+# ---- BinaryDosage chunks (random access by SNP; no large sequential scan) ----
 
-  for (b in seq_along(batches)) {
-    pos_rds <- file.path(tmp, sprintf("_pgscorer_pos_%02d.rds", b))
-    dos_rds <- file.path(tmp, sprintf("_pgscorer_dos_%02d.rds", b))
-    batch_dos_files[b] <- dos_rds
-
-    saveRDS(batches[[b]], pos_rds)
-    if (verbose)
-      cat(sprintf("  Batch %d/%d : %d positions\n", b, n_batches, length(batches[[b]])))
-
-    status <- system2(
-      rscript,
-      args = c(shQuote(worker_script),
-               shQuote(pos_rds), shQuote(vcf_path), chrom, shQuote(dos_rds))
-    )
-    file.remove(pos_rds)
-    if (status != 0L)
-      stop(sprintf("Batch %d subprocess failed (exit status %d)", b, status))
-  }
-
-  dosage_parts <- Filter(Negate(is.null), lapply(batch_dos_files, readRDS))
-  for (f in batch_dos_files) if (file.exists(f)) file.remove(f)
-  dosage_all <- if (length(dosage_parts) > 0L) do.call(rbind, dosage_parts) else NULL
-  rm(dosage_parts)
-  invisible(gc())
-  dosage_all
-}
-
-# ---- BinaryDosage dosage retrieval (in-process, random-access by SNP) -------
-
-.query_bd_dosage <- function(bdose_path, contig, positions, verbose) {
-  if (length(positions) == 0L) return(NULL)
-  stopifnot("BinaryDosage is not installed" = requireNamespace("BinaryDosage", quietly = TRUE))
-
+.bd_chunk_reader <- function(bdose_path, contig, positions, scoring_samples, batch_size, verbose) {
   bdinfo <- .get_bdinfo(bdose_path)
   snps   <- bdinfo$snps
   idx    <- which(snps$chromosome == contig & snps$location %in% positions)
-
   if (verbose)
     cat(sprintf("  %d/%d SNP(s) in %s match requested positions\n",
                 length(idx), nrow(snps), basename(bdose_path)))
-  if (length(idx) == 0L) return(NULL)
 
-  samp_ids <- bdinfo$samples$sid
-  dos_mat  <- t(vapply(idx, function(i) {
-    BinaryDosage::getsnp(bdinfo, i, dosageonly = TRUE)$dosage
-  }, FUN.VALUE = numeric(length(samp_ids))))
-  colnames(dos_mat) <- samp_ids
+  meta <- data.frame(POS = snps$location[idx], REF = snps$reference[idx],
+                     ALT = snps$alternate[idx], stringsAsFactors = FALSE)
+  rm(snps)
+  samp_pos <- match(scoring_samples, as.character(bdinfo$samples$sid))   # keep only the scored samples
+  groups   <- split(seq_along(idx), ceiling(seq_along(idx) / batch_size))
+  k        <- 0L
 
-  cbind(
-    data.frame(
-      POS = snps$location[idx],
-      ID  = snps$snpid[idx],
-      REF = snps$reference[idx],
-      ALT = snps$alternate[idx],
-      stringsAsFactors = FALSE
-    ),
-    as.data.frame(dos_mat, stringsAsFactors = FALSE)
+  function() {
+    if (k >= length(groups)) return(NULL)
+    k    <<- k + 1L
+    rows <- groups[[k]]
+    D <- matrix(
+      vapply(idx[rows], function(i)
+        BinaryDosage::getsnp(bdinfo, i, dosageonly = TRUE)$dosage[samp_pos],
+        FUN.VALUE = numeric(length(samp_pos))),
+      nrow = length(samp_pos))
+    list(meta = meta[rows, , drop = FALSE], D = D)
+  }
+}
+
+# ---- VCF chunks (batched; subprocess-isolated off Windows) --------------------
+
+.vcf_chunk_reader <- function(vcf_path, contig, positions, scoring_samples, batch_size, verbose) {
+  batches    <- split(positions, ceiling(seq_along(positions) / batch_size))
+  # tabixr's data.frame can rename sample columns ("1001" -> "X1001"); the header has the true IDs.
+  sample_ids <- tabixr::vcf_samples(vcf_path)
+  subprocess <- .Platform$OS.type != "windows"
+  b          <- 0L
+
+  function() {
+    repeat {
+      b <<- b + 1L
+      if (b > length(batches)) return(NULL)
+      if (verbose)
+        cat(sprintf("  Batch %d/%d : %d positions", b, length(batches), length(batches[[b]])))
+
+      dos <- if (subprocess) .vcf_batch_subprocess(vcf_path, contig, batches[[b]], b)
+             else            .vcf_batch_inprocess(vcf_path, contig, batches[[b]], sample_ids)
+      if (is.null(dos) || nrow(dos) == 0L) {
+        if (verbose) cat(" - 0 hits\n")
+        next
+      }
+      if (verbose) cat(sprintf(" - %d VCF row(s)\n", nrow(dos)))
+
+      return(list(meta = dos[, c("POS", "REF", "ALT")],
+                  D    = t(as.matrix(dos[, scoring_samples, drop = FALSE]))))
+    }
+  }
+}
+
+.vcf_batch_inprocess <- function(vcf_path, contig, batch_pos, sample_ids) {
+  hits    <- tabixr::query_vcf_positions(vcf_path, contig, batch_pos)
+  matched <- hits[hits$POS %in% batch_pos, ]
+  rm(hits)
+  if (nrow(matched) == 0L) return(NULL)
+  extract_dosage(matched, sample_ids)
+}
+
+# One batch in its own Rscript process so the memory tabixr uses is returned to
+# the operating system when the process exits.
+.vcf_batch_subprocess <- function(vcf_path, contig, batch_pos, b) {
+  pos_rds <- file.path(tempdir(), sprintf("_pgscorer_pos_%d.rds", b))
+  dos_rds <- file.path(tempdir(), sprintf("_pgscorer_dos_%d.rds", b))
+  on.exit(unlink(c(pos_rds, dos_rds)), add = TRUE)
+
+  saveRDS(batch_pos, pos_rds)
+  status <- system2(
+    file.path(R.home("bin"), "Rscript"),
+    args = c(shQuote(system.file("extdata", "batch_worker.R", package = "pgscorer")),
+             shQuote(pos_rds), shQuote(vcf_path), contig, shQuote(dos_rds))
   )
+  if (status != 0L)
+    stop(sprintf("Batch %d subprocess failed (exit status %d)", b, status))
+  readRDS(dos_rds)
 }

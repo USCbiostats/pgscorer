@@ -43,6 +43,14 @@ results$PGS002164$excluded_chr_counts  # named integer vector: allele-mismatch e
 results$PGS002164$excluded_samples     # sample IDs left out because a queried file lacked them (see below)
 ```
 
+### Memory use
+
+Genotypes are streamed, not loaded whole: `compute_prs()` reads a bounded number of SNPs at a time, adds their contribution to each model's running scores, and discards them. Memory therefore depends on the number of samples and on `batch_size`, **not on the number of SNPs in the models**, so large PGS Catalog models don't need more memory than small ones.
+
+With `batch_size = NULL` (the default) the chunk is sized so about 250 MB of dosage data is held at once, capped at 10,000 positions: roughly 100 positions per chunk for BinaryDosage and 15 for VCF at 139,000 samples, and the full 10,000 for a small cohort. Set `batch_size` yourself to trade memory for speed: memory is roughly `batch_size` × number of samples × 8 bytes for BinaryDosage (several times that for VCF, which is read as text). Smaller chunks use less memory but run somewhat slower.
+
+Peak memory also includes the file headers (sample and SNP lists), which for Format 4 files are large for big cohorts; saving a `.bdinfo` file avoids re-parsing them (see below).
+
 ### Samples that differ between files
 
 The genotype files don't have to contain exactly the same samples. Subjects are often dropped from some chromosomes (for example for poor imputation quality), so chromosome 1 might have 139,045 subjects and chromosome 2 has 139,046. A score can only be summed across chromosomes for subjects that every file has, so `compute_prs()` first takes the **intersection of sample IDs across all the genotype files it will actually query** and scores only those samples. Everyone left out is listed in `excluded_samples` (the same for every model), and with `verbose = TRUE` the count is printed:
@@ -63,7 +71,7 @@ Sample IDs are used exactly as stored, including purely numeric IDs (`1001`), fo
 | `format` | `NULL` | `"vcf"` or `"bdose"` to force the genotype file type; `NULL` = autodetect from what's in `geno_dir`. If both types are present, BinaryDosage is used and a message is printed |
 | `pgs_files` | `NULL` | Character vector of PGS Catalog scoring file paths; `NULL` = auto-discover in `pgs_dir` |
 | `pgs_dir` | `"."` | Directory searched for PGS files when `pgs_files` is `NULL` |
-| `batch_size` | `10000L` | Positions per VCF query batch (ignored for BinaryDosage input) |
+| `batch_size` | `NULL` | Maximum number of positions read and scored at a time, for both VCF and BinaryDosage input. `NULL` chooses automatically from the number of samples (see [Memory use](#memory-use)); lower it if memory is short |
 | `output_dir` | `"."` | Directory for output `.rds` files; `NULL` = do not save |
 | `verbose` | `TRUE` | Print progress and summary |
 
