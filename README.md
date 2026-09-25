@@ -22,7 +22,7 @@ remotes::install_github("USCbiostats/pgscorer")
 library(pgscorer)
 
 results <- compute_prs(
-  geno_dir   = "path/to/genotypes",   # directory of chr1.vcf.gz, chr2.vcf.gz, ... OR chr1.bdose, chr2.bdose, ...
+  geno_dir   = "path/to/genotypes",   # directory of indexed VCFs (.vcf.gz + .tbi) and/or BinaryDosage files (.bdose + .bdi)
   format     = NULL,                  # NULL = autodetect; "vcf" or "bdose" to force
   pgs_files  = c("PGS002164_hmPOS_GRCh37.txt.gz",
                  "PGS002863_hmPOS_GRCh37.txt.gz"),
@@ -46,7 +46,7 @@ results$PGS002164$excluded_chr_counts  # named integer vector: allele-mismatch e
 
 | Argument | Default | Description |
 |---|---|---|
-| `geno_dir` | `"."` | Directory containing per-chromosome genotype files: `chr<N>.vcf.gz` (with `.tbi` alongside) or `chr<N>.bdose` (with `.bdose.bdi` alongside) |
+| `geno_dir` | `"."` | Directory containing the genotype files: BGZF VCFs (`*.vcf.gz` with `*.vcf.gz.tbi` alongside) and/or BinaryDosage files (`*.bdose` with `*.bdose.bdi` alongside). File names are arbitrary |
 | `format` | `NULL` | `"vcf"` or `"bdose"` to force the genotype file type; `NULL` = autodetect from what's in `geno_dir`. If both types are present, BinaryDosage is used and a message is printed |
 | `pgs_files` | `NULL` | Character vector of PGS Catalog scoring file paths; `NULL` = auto-discover in `pgs_dir` |
 | `pgs_dir` | `"."` | Directory searched for PGS files when `pgs_files` is `NULL` |
@@ -72,14 +72,18 @@ Scoring files should be downloaded directly from [pgscatalog.org](https://www.pg
 
 ## Genotype file requirements
 
-Genotype files are discovered by name in `geno_dir`: `chr1.vcf.gz`, `chr2.vcf.gz`, ... or `chr1.bdose`, `chr2.bdose`, ... (chromosome labels `1`–`22`, `X`, `Y`, `MT`).
+Genotype files are found through their index files, so file names don't matter (`chr1.vcf.gz`, `cohortA_part1.vcf.gz`, ... all work). Each `*.vcf.gz.tbi` identifies a VCF and each `*.bdose.bdi` identifies a BinaryDosage file. The chromosome(s) in each file are read from the index, and a leading `chr` is ignored when matching against the PGS files (`chr1` in a VCF matches `1` in a scoring file). An index with no data file next to it is skipped with a warning.
+
+If two files of the format in use contain the same chromosome, `compute_prs()` stops with an error naming the files.
 
 **VCF:**
-- BGZF-compressed (`.vcf.gz`) with a Tabix index (`.vcf.gz.tbi`)
+- BGZF-compressed with the extension `.vcf.gz` and a Tabix index (`.vcf.gz.tbi`); other extensions such as `.vcf.bgz` are not recognised
+- Chromosomes are taken from the contig names in the Tabix index
 - Must contain a `DS` (dosage) field in the `FORMAT` column
 
 **BinaryDosage:**
 - Format 5 (`.bdose` + companion `.bdose.bdi`), e.g. as produced by `BinaryDosage::vcftobd()`
+- Chromosomes are taken from the `.bdi`
 
 ## Allele effect formula
 
