@@ -324,39 +324,51 @@ compute_prs <- function(geno_dir   = ".",
     saved <- tryCatch(readRDS(bdinfo_file), error = function(e) NULL)
     if (.valid_bdinfo(saved, path)) {
       saved$filename <- path
+      attr(saved, "info_source") <- "bdinfo"
       return(saved)
     }
     warning(sprintf("Ignoring %s: it could not be read as a getbdinfo() result matching %s. Reading %s instead.",
                     basename(bdinfo_file), basename(path), basename(path)), call. = FALSE)
   }
 
-  tryCatch(
+  bdinfo <- tryCatch(
     BinaryDosage::getbdinfo(bdfiles = path),
     error = function(e)
       stop(sprintf(paste0("Could not read BinaryDosage file %s (Format 4 and 5 files are supported; ",
                           "Format 5 needs its %s.bdi alongside): %s"),
                    path, basename(path), conditionMessage(e)), call. = FALSE)
   )
+  attr(bdinfo, "info_source") <- if (file.exists(paste0(path, ".bdi"))) "bdi" else "parsed"
+  bdinfo
 }
 
-# Chromosome label(s) contained in one genotype file, read from its index
-# (VCF) or its BinaryDosage information. Returns the labels exactly as stored
-# in the file (e.g. "chr1" or "1").
-.file_contigs <- function(path, format) {
-  if (format == "vcf") return(tabixr::vcf_seqnames(path))
+# What one genotype file contains: the chromosome label(s) exactly as stored in
+# the file (e.g. "chr1" or "1"), its sample IDs, where the information came
+# from (VCF: "tbi"; BinaryDosage: "bdi", "bdinfo", or "parsed" = read from the
+# whole data file), and the BinaryDosage format number (NA for VCF).
+.file_info <- function(path, format) {
+  if (format == "vcf")
+    return(list(contigs = tabixr::vcf_seqnames(path), samples = tabixr::vcf_samples(path),
+                info = "tbi", version = NA_integer_))
 
   bdinfo  <- .get_bdinfo(path)
   contigs <- unique(as.character(bdinfo$snps$chromosome))
   if (any(is.na(contigs) | !nzchar(contigs)))
     stop(sprintf("BinaryDosage file %s has SNPs with no chromosome recorded", path), call. = FALSE)
-  contigs
+  version <- bdinfo$additionalinfo$format
+  list(contigs = contigs, samples = as.character(bdinfo$samples$sid),
+       info = attr(bdinfo, "info_source"),
+       version = if (is.null(version)) NA_integer_ else as.integer(version))
 }
 
 # Discover genotype files in geno_dir, resolve which format to use, and work
 # out which chromosome(s) each file holds. Returns a data.frame with one row
 # per (file, chromosome): chrom (label without "chr"), contig (label as stored
-# in the file), path, format. Stops if a chromosome appears in more than one file.
-.discover_geno_files <- function(geno_dir, format, verbose) {
+# in the file), file, format, version, info, n_samples, path. Duplicate
+# chromosomes are NOT rejected here (see .discover_geno_files). Attributes:
+# "samples" (list of sample IDs per file path) and "unused" (list with the
+# format and paths of any files of the other format that were not used).
+.scan_geno_files <- function(geno_dir, format, verbose) {
   vcf_files   <- .find_indexed_files(geno_dir, ".tbi", ".vcf.gz")
   bdose_files <- .find_bdose_files(geno_dir)
   has_vcf   <- length(vcf_files)   > 0L
@@ -380,14 +392,27 @@ compute_prs <- function(geno_dir   = ".",
     stop(sprintf("No genotype files (*.vcf.gz + .tbi, or *.bdose) found in %s", geno_dir))
   }
 
-  files <- if (chosen == "vcf") vcf_files else bdose_files
-  geno  <- do.call(rbind, lapply(files, function(f) {
-    contigs <- .file_contigs(f, chosen)
-    if (length(contigs) == 0L)
-      stop(sprintf("No chromosomes found in %s", f))
-    data.frame(chrom = .norm_chrom(contigs), contig = contigs, path = f,
-               format = chosen, stringsAsFactors = FALSE)
+  files  <- if (chosen == "vcf") vcf_files else bdose_files
+  infos  <- lapply(files, .file_info, format = chosen)
+  geno   <- do.call(rbind, lapply(seq_along(files), function(i) {
+    if (length(infos[[i]]$contigs) == 0L)
+      stop(sprintf("No chromosomes found in %s", files[i]))
+    data.frame(chrom = .norm_chrom(infos[[i]]$contigs), contig = infos[[i]]$contigs,
+               file = basename(files[i]), format = chosen, version = infos[[i]]$version,
+               info = infos[[i]]$info, n_samples = length(infos[[i]]$samples),
+               path = files[i], stringsAsFactors = FALSE)
   }))
+  attr(geno, "samples") <- setNames(lapply(infos, `[[`, "samples"), files)
+  attr(geno, "unused")  <- list(format = if (chosen == "vcf") "bdose" else "vcf",
+                                paths  = if (chosen == "vcf") bdose_files else vcf_files)
+  geno
+}
+
+# .scan_geno_files() plus the check compute_prs() needs: stops if a chromosome
+# appears in more than one file. Returns the rows ordered by chromosome.
+.discover_geno_files <- function(geno_dir, format, verbose) {
+  geno   <- .scan_geno_files(geno_dir, format, verbose)
+  chosen <- geno$format[1L]
 
   dups <- unique(geno$chrom[duplicated(geno$chrom)])
   if (length(dups) > 0L) {

@@ -2,4 +2,5 @@
 
 export(compute_prs)
 export(extract_dosage)
+export(find_geno_files)
 export(readPGSmodel)

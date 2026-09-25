@@ -66,6 +66,33 @@ pgs_<model>_prs.rds
 
 Each file contains that model's full result list (`prs`, `unmatched_by_chr`, `unmatched_rsIDs`, `excluded_chr_counts`), not just the PRS vector.
 
+### Checking a genotype directory first
+
+`find_geno_files()` takes the same `geno_dir` and `format` arguments as `compute_prs()` and reports what would be used, without running any scoring:
+
+```r
+find_geno_files("path/to/genotypes")                   # autodetect, prints a report
+files <- find_geno_files("path/to/genotypes", format = "vcf", verbose = FALSE)   # just the data.frame
+```
+
+```
+Genotype files in path/to/genotypes
+  Format used : BinaryDosage (autodetected)
+  Files       : 4, covering 3 chromosome(s)
+
+ chrom contig             file version   info n_samples duplicated
+     1   chr1       chr1.bdose       4 parsed         3       TRUE
+     1   chr1 chr1_again.bdose       4 parsed         3       TRUE
+     2   chr2       chr2.bdose       4 bdinfo         3      FALSE
+    19  chr19      chr19.bdose       4 parsed         3      FALSE
+
+Potential problems:
+  - Chromosome 1 is in more than one file (chr1.bdose, chr1_again.bdose); compute_prs() would stop.
+  - 3 Format 4 file(s) have no .bdinfo and are parsed in full each time ...
+```
+
+It returns (invisibly) a data.frame with one row per file and chromosome: `chrom` (the form matched against PGS files), `contig` (as stored in the file), `file`, `format`, `version` (BinaryDosage format 4 or 5), `info` (`tbi`, `bdi`, `bdinfo`, or `parsed` for a full parse of the data file), `n_samples`, `duplicated`, and `path`. The problems it lists are: a chromosome present in more than one file (`compute_prs()` would stop), Format 4 files without a `.bdinfo` (slow), and files whose sample IDs differ. A duplicated chromosome is reported here instead of raising an error.
+
 ## PGS Catalog file format
 
 Scoring files should be downloaded directly from [pgscatalog.org](https://www.pgscatalog.org/) in the standard tab-delimited `.txt.gz` format. Harmonised position columns (`hm_chr`, `hm_pos`) are preferred over raw columns (`chr_name`, `chr_position`) when both are present.
