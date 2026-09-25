@@ -1,21 +1,39 @@
 #' Compute Polygenic Risk Scores from PGS Catalog Models
 #'
 #' Reads one or more PGS Catalog scoring files, determines which chromosomes
-#' they need, and scores each model against per-chromosome genotype files
-#' found in \code{geno_dir} — either BGZF/Tabix VCF (\code{chr<N>.vcf.gz}) or
-#' BinaryDosage Format 5 (\code{chr<N>.bdose}). Positions are unioned across
-#' models on each chromosome so a shared position is only queried once.
+#' they need, and scores each model against the genotype files found in
+#' \code{geno_dir} — either BGZF/Tabix VCF or BinaryDosage (Format 4 or 5).
+#' Positions are unioned across models on each chromosome so a shared position
+#' is only queried once.
 #'
-#' Genotype files are found through their index files, so file names are
-#' arbitrary: every \code{*.vcf.gz.tbi} in \code{geno_dir} identifies a VCF and
-#' every \code{*.bdose.bdi} identifies a BinaryDosage file. The chromosome(s) in
-#' each file are read from the index (VCF: the contig names in the Tabix index;
-#' BinaryDosage: the chromosome column of the \code{.bdi}). A leading
+#' Genotype files are found by extension, so file names are otherwise
+#' arbitrary: every \code{*.vcf.gz} with a \code{.tbi} index is a VCF, and every
+#' \code{*.bdose} is a BinaryDosage file (Format 5, which also needs its
+#' \code{.bdose.bdi}, or the single-file Format 4; see below for a faster
+#' way to use Format 4 files). The chromosome(s) in
+#' each file are read from the file's own metadata (VCF: the contig names in
+#' the Tabix index; BinaryDosage: the chromosome column of the header or
+#' \code{.bdi}). A leading
 #' \code{"chr"} is ignored when matching against the PGS files' chromosome
 #' labels. If two files (of the format in use) contain the same chromosome,
 #' an error is raised. If a model references a chromosome for which no
 #' genotype file exists, every SNP on that chromosome is reported as unmatched
 #' (with a warning) rather than causing an error.
+#'
+#' Format 4 (and earlier) BinaryDosage files have no companion information
+#' file, so \code{BinaryDosage::getbdinfo()} must parse the whole data file to
+#' get their chromosomes, samples, and SNP offsets. To avoid that, save the
+#' result next to the data file with \code{.bdose} replaced by \code{.bdinfo},
+#' e.g. \code{saveRDS(getbdinfo("chr1.bdose"), "chr1.bdinfo")}; if that file
+#' exists it is used instead. Format 5 files are unaffected (they use their
+#' \code{.bdi}, and any \code{.bdinfo} beside them is ignored). The path stored
+#' inside a \code{.bdinfo} is always replaced with the actual location of the
+#' data file, so the files may be moved or copied after it was created. A
+#' \code{.bdinfo} that cannot be read, or whose SNP offsets are inconsistent
+#' with the data file, is ignored with a warning and the data file is parsed
+#' instead. Regenerate it whenever the \code{.bdose} file is rewritten; a
+#' \code{.bdinfo} left over from an older version of the data file cannot be
+#' detected beyond those consistency checks.
 #'
 #' On Windows, VCF batches are queried in-process; on other platforms each VCF
 #' batch runs in its own \code{Rscript} subprocess to bound peak memory.
@@ -23,8 +41,9 @@
 #' large sequential scan to isolate).
 #'
 #' @param geno_dir   Directory containing the genotype files: BGZF VCFs with a
-#'   \code{.vcf.gz.tbi} index and/or BinaryDosage Format 5 files with a
-#'   \code{.bdose.bdi} companion. Defaults to the current working directory.
+#'   \code{.vcf.gz.tbi} index and/or BinaryDosage \code{.bdose} files (Format 4,
+#'   or Format 5 with its \code{.bdose.bdi}). Defaults to the current working
+#'   directory.
 #' @param format     \code{"vcf"} or \code{"bdose"} to force the genotype file
 #'   type; \code{NULL} (default) autodetects from what is present in
 #'   \code{geno_dir}. If both types are present and \code{format} is
@@ -264,15 +283,73 @@ compute_prs <- function(geno_dir   = ".",
   sort(data_files[!orphan])
 }
 
-# Chromosome label(s) contained in one genotype file, read from its index.
-# Returns the labels exactly as stored in the file (e.g. "chr1").
-.file_contigs <- function(path, format) {
-  if (format == "vcf") {
-    tabixr::vcf_seqnames(path)
-  } else {
-    stopifnot("BinaryDosage is not installed" = requireNamespace("BinaryDosage", quietly = TRUE))
-    unique(as.character(BinaryDosage::getbdinfo(bdfiles = path)$snps$chromosome))
+# BinaryDosage files in dir. Format 5 files have a companion .bdi; Format 4
+# files are a single self-contained file, so the .bdose file itself is what
+# identifies them. A .bdi with no .bdose next to it is skipped with a warning.
+.find_bdose_files <- function(dir) {
+  all_files <- list.files(dir, full.names = TRUE)
+  bdose     <- all_files[endsWith(all_files, ".bdose")]
+  bdi       <- all_files[endsWith(all_files, ".bdose.bdi")]
+  orphan    <- !file.exists(substr(bdi, 1L, nchar(bdi) - nchar(".bdi")))
+  if (any(orphan))
+    warning(sprintf("Index file(s) without a matching data file were ignored:\n  %s",
+                    paste(basename(bdi[orphan]), collapse = "\n  ")))
+  sort(bdose)
+}
+
+# A saved getbdinfo() result is only trusted if it has the pieces getsnp()
+# needs and its SNP offsets are consistent with the data file it is paired with.
+.valid_bdinfo <- function(x, bdose_path) {
+  is.list(x) && inherits(x, "genetic-info") &&
+    all(c("filename", "samples", "snps", "indices") %in% names(x)) &&
+    is.data.frame(x$snps) && length(x$indices) == nrow(x$snps) &&
+    (length(x$indices) == 0L || max(x$indices) < file.size(bdose_path))
+}
+
+# BinaryDosage file information (the getbdinfo() result) for one .bdose file.
+#
+# Format 5 keeps its information in the companion .bdi, which getbdinfo() reads
+# cheaply. For earlier formats getbdinfo() has to parse the whole data file, so
+# if <name>.bdinfo (a saveRDS() of a previous getbdinfo() result) sits next to
+# <name>.bdose it is used instead. The stored 'filename' is always replaced
+# with the actual path: getsnp() reads from it, and a stale path (files moved
+# or copied since the .bdinfo was made) silently returns zeros, not an error.
+# A .bdinfo that cannot be read or does not match the data file is ignored
+# with a warning and the data file is parsed instead.
+.get_bdinfo <- function(path) {
+  stopifnot("BinaryDosage is not installed" = requireNamespace("BinaryDosage", quietly = TRUE))
+
+  bdinfo_file <- sub("\\.bdose$", ".bdinfo", path)
+  if (!file.exists(paste0(path, ".bdi")) && file.exists(bdinfo_file)) {
+    saved <- tryCatch(readRDS(bdinfo_file), error = function(e) NULL)
+    if (.valid_bdinfo(saved, path)) {
+      saved$filename <- path
+      return(saved)
+    }
+    warning(sprintf("Ignoring %s: it could not be read as a getbdinfo() result matching %s. Reading %s instead.",
+                    basename(bdinfo_file), basename(path), basename(path)), call. = FALSE)
   }
+
+  tryCatch(
+    BinaryDosage::getbdinfo(bdfiles = path),
+    error = function(e)
+      stop(sprintf(paste0("Could not read BinaryDosage file %s (Format 4 and 5 files are supported; ",
+                          "Format 5 needs its %s.bdi alongside): %s"),
+                   path, basename(path), conditionMessage(e)), call. = FALSE)
+  )
+}
+
+# Chromosome label(s) contained in one genotype file, read from its index
+# (VCF) or its BinaryDosage information. Returns the labels exactly as stored
+# in the file (e.g. "chr1" or "1").
+.file_contigs <- function(path, format) {
+  if (format == "vcf") return(tabixr::vcf_seqnames(path))
+
+  bdinfo  <- .get_bdinfo(path)
+  contigs <- unique(as.character(bdinfo$snps$chromosome))
+  if (any(is.na(contigs) | !nzchar(contigs)))
+    stop(sprintf("BinaryDosage file %s has SNPs with no chromosome recorded", path), call. = FALSE)
+  contigs
 }
 
 # Discover genotype files in geno_dir, resolve which format to use, and work
@@ -281,7 +358,7 @@ compute_prs <- function(geno_dir   = ".",
 # in the file), path, format. Stops if a chromosome appears in more than one file.
 .discover_geno_files <- function(geno_dir, format, verbose) {
   vcf_files   <- .find_indexed_files(geno_dir, ".tbi", ".vcf.gz")
-  bdose_files <- .find_indexed_files(geno_dir, ".bdi", ".bdose")
+  bdose_files <- .find_bdose_files(geno_dir)
   has_vcf   <- length(vcf_files)   > 0L
   has_bdose <- length(bdose_files) > 0L
 
@@ -290,7 +367,7 @@ compute_prs <- function(geno_dir   = ".",
     if (chosen == "vcf"   && !has_vcf)
       stop(sprintf("format='vcf' requested but no indexed VCF files (*.vcf.gz + *.vcf.gz.tbi) found in %s", geno_dir))
     if (chosen == "bdose" && !has_bdose)
-      stop(sprintf("format='bdose' requested but no BinaryDosage files (*.bdose + *.bdose.bdi) found in %s", geno_dir))
+      stop(sprintf("format='bdose' requested but no BinaryDosage files (*.bdose) found in %s", geno_dir))
   } else if (has_vcf && has_bdose) {
     chosen <- "bdose"
     if (verbose)
@@ -300,7 +377,7 @@ compute_prs <- function(geno_dir   = ".",
   } else if (has_vcf) {
     chosen <- "vcf"
   } else {
-    stop(sprintf("No indexed genotype files (*.vcf.gz + .tbi, or *.bdose + .bdi) found in %s", geno_dir))
+    stop(sprintf("No genotype files (*.vcf.gz + .tbi, or *.bdose) found in %s", geno_dir))
   }
 
   files <- if (chosen == "vcf") vcf_files else bdose_files
@@ -329,8 +406,7 @@ compute_prs <- function(geno_dir   = ".",
   if (geno_row$format[1L] == "vcf") {
     tabixr::vcf_samples(geno_row$path[1L])
   } else {
-    stopifnot("BinaryDosage is not installed" = requireNamespace("BinaryDosage", quietly = TRUE))
-    BinaryDosage::getbdinfo(bdfiles = geno_row$path[1L])$samples$sid
+    .get_bdinfo(geno_row$path[1L])$samples$sid
   }
 }
 
@@ -416,7 +492,7 @@ compute_prs <- function(geno_dir   = ".",
   if (length(positions) == 0L) return(NULL)
   stopifnot("BinaryDosage is not installed" = requireNamespace("BinaryDosage", quietly = TRUE))
 
-  bdinfo <- BinaryDosage::getbdinfo(bdfiles = bdose_path)
+  bdinfo <- .get_bdinfo(bdose_path)
   snps   <- bdinfo$snps
   idx    <- which(snps$chromosome == contig & snps$location %in% positions)
 
