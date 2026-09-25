@@ -36,11 +36,24 @@ If `pgs_files` is omitted, all files matching `^PGS.*\.txt\.gz$` in the current 
 `compute_prs()` returns a named list (invisibly), one element per model, each itself a list:
 
 ```r
-results$PGS002164$prs                  # named numeric vector of PRS values, one per sample
+results$PGS002164$prs                  # named numeric vector of PRS values, one per scored sample
 results$PGS002164$unmatched_by_chr     # named integer vector: unmatched SNP count per chromosome
 results$PGS002164$unmatched_rsIDs      # named list: unmatched rsIDs per chromosome
 results$PGS002164$excluded_chr_counts  # named integer vector: allele-mismatch exclusions per chromosome
+results$PGS002164$excluded_samples     # sample IDs left out because a queried file lacked them (see below)
 ```
+
+### Samples that differ between files
+
+The genotype files don't have to contain exactly the same samples. Subjects are often dropped from some chromosomes (for example for poor imputation quality), so chromosome 1 might have 139,045 subjects and chromosome 2 has 139,046. A score can only be summed across chromosomes for subjects that every file has, so `compute_prs()` first takes the **intersection of sample IDs across all the genotype files it will actually query** and scores only those samples. Everyone left out is listed in `excluded_samples` (the same for every model), and with `verbose = TRUE` the count is printed:
+
+```
+Sample IDs: scoring the 139045 sample(s) present in all 22 genotype file(s) used; 1 sample(s) missing from at least one file are excluded.
+```
+
+Only files for chromosomes the models use count, so a file for an unused chromosome never removes anyone. If the intersection is empty, `compute_prs()` stops with an error listing each file's sample count and first IDs: that means the files are from different cohorts or the IDs are formatted differently (e.g. `1001` vs `1001_1001`). `find_geno_files()` reports the intersection size ahead of time.
+
+Sample IDs are used exactly as stored, including purely numeric IDs (`1001`), for both VCF and BinaryDosage input.
 
 ### Arguments
 

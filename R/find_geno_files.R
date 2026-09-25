@@ -79,8 +79,15 @@ find_geno_files <- function(geno_dir = ".", format = NULL, verbose = TRUE) {
       "%d Format 4 file(s) have no .bdinfo and are parsed in full each time (slow for large files); create one with saveRDS(getbdinfo(file), \"<name>.bdinfo\"): %s",
       length(slow), paste(slow, collapse = ", ")))
   sets <- unique(lapply(samples, function(s) sort(s)))
-  if (length(sets) > 1L)
-    issues <- c(issues, "Sample IDs differ between files; scores need every file to contain the same samples.")
+  if (length(sets) > 1L) {
+    common <- Reduce(intersect, samples)
+    n_all  <- length(unique(unlist(samples, use.names = FALSE)))
+    issues <- c(issues, if (length(common) == 0L)
+      "No sample IDs are common to all the files listed; compute_prs() would stop."
+    else
+      sprintf("Sample IDs differ between files: %d are in every file listed and compute_prs() scores only those, excluding %d that are missing from at least one (only files it actually queries count).",
+              length(common), n_all - length(common)))
+  }
   attr(geno, "issues") <- issues
 
   if (verbose) {

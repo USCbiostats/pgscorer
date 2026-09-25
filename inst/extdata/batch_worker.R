@@ -21,5 +21,6 @@ rm(vcf_hits)
 if (nrow(matched) == 0L) {
   saveRDS(NULL, out_rds)
 } else {
-  saveRDS(extract_dosage(matched), out_rds)
+  # tabixr's data.frame can rename sample columns ("1001" -> "X1001"); the header has the true IDs.
+  saveRDS(extract_dosage(matched, tabixr::vcf_samples(VCF_PATH)), out_rds)
 }

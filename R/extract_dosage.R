@@ -10,17 +10,35 @@
 #' (\code{GT:DS:GP}, \code{GT:GP:DS}, etc.). Rows where \code{DS} is missing
 #' (\code{"."}) are returned as \code{NA}.
 #'
+#' Sample columns of the data.frame from \code{tabixr} can have altered names:
+#' R's \code{data.frame()} turns an ID such as \code{"1001"} into
+#' \code{"X1001"}. Pass the true IDs (in header order, as returned by
+#' \code{tabixr::vcf_samples()}) as \code{sample_ids} to name the output columns
+#' correctly.
+#'
 #' @param df A data.frame as returned by \code{tabixr::query_vcf_positions()}.
+#' @param sample_ids Optional character vector of sample IDs to use as the names
+#'   of the sample columns, one per sample column of \code{df} and in the same
+#'   order. Default \code{NULL} uses the column names of \code{df}.
 #'
 #' @return A data.frame with columns \code{POS} (integer), \code{ID},
 #'   \code{REF}, \code{ALT} (all character), and one numeric column per sample.
 #' @export
-extract_dosage <- function(df) {
+extract_dosage <- function(df, sample_ids = NULL) {
+  fmt_col   <- match("FORMAT", names(df))
+  samp_cols <- names(df)[(fmt_col + 1L):ncol(df)]
+  if (is.null(sample_ids)) {
+    out_names <- samp_cols
+  } else if (length(sample_ids) == length(samp_cols)) {
+    out_names <- as.character(sample_ids)
+  } else {
+    stop(sprintf("sample_ids has %d element(s) but the data.frame has %d sample column(s)",
+                 length(sample_ids), length(samp_cols)))
+  }
+
   if (nrow(df) == 0L) {
-    fmt_col   <- match("FORMAT", names(df))
-    samp_cols <- names(df)[(fmt_col + 1L):ncol(df)]
     out <- df[, c("POS", "ID", "REF", "ALT")]
-    for (col in samp_cols) out[[col]] <- numeric(0)
+    for (col in out_names) out[[col]] <- numeric(0)
     return(out)
   }
 
@@ -30,9 +48,6 @@ extract_dosage <- function(df) {
   if (is.na(ds_idx))
     stop("DS field not found in FORMAT: ", fmt)
 
-  fmt_col   <- match("FORMAT", names(df))
-  samp_cols <- names(df)[(fmt_col + 1L):ncol(df)]
-
   # Extract the ds_idx-th colon-delimited token from each sample column.
   pattern <- paste0("^(?:[^:]*:){", ds_idx - 1L, "}([^:]*).*$")
   ds_vals <- lapply(samp_cols, function(col) {
@@ -41,7 +56,9 @@ extract_dosage <- function(df) {
 
   cbind(
     df[, c("POS", "ID", "REF", "ALT")],
-    as.data.frame(setNames(ds_vals, samp_cols), stringsAsFactors = FALSE),
+    # check.names = FALSE so as.data.frame() does not rename the sample columns
+    # itself (e.g. "1001" -> "X1001").
+    as.data.frame(setNames(ds_vals, out_names), stringsAsFactors = FALSE, check.names = FALSE),
     stringsAsFactors = FALSE
   )
 }

@@ -20,6 +20,13 @@
 #' genotype file exists, every SNP on that chromosome is reported as unmatched
 #' (with a warning) rather than causing an error.
 #'
+#' The genotype files need not contain exactly the same samples (for example
+#' subjects dropped from some chromosomes for poor imputation quality). Only
+#' samples present in every file that is actually queried are scored, since a
+#' chromosome's contribution can only be added for samples every file has; the
+#' others are listed in \code{excluded_samples} and, if \code{verbose}, counted
+#' in the log. If no sample is common to all the files, an error is raised.
+#'
 #' Format 4 (and earlier) BinaryDosage files have no companion information
 #' file, so \code{BinaryDosage::getbdinfo()} must parse the whole data file to
 #' get their chromosomes, samples, and SNP offsets. To avoid that, save the
@@ -64,7 +71,11 @@
 #' @return A named list (invisibly), one element per model, each itself a list
 #'   with:
 #'   \describe{
-#'     \item{prs}{Named numeric vector of PRS values, one per sample.}
+#'     \item{prs}{Named numeric vector of PRS values, one per scored sample
+#'       (those present in every genotype file that was queried).}
+#'     \item{excluded_samples}{Character vector of sample IDs left out because
+#'       they were missing from at least one queried file (the same for every
+#'       model); empty when all files have the same samples.}
 #'     \item{unmatched_by_chr}{Named integer vector, one entry per chromosome
 #'       referenced by any model or found in \code{geno_dir}: the number of
 #'       this model's SNPs on that chromosome with no matching genotype
@@ -137,8 +148,17 @@ compute_prs <- function(geno_dir   = ".",
     warning(sprintf("No genotype file found for chromosome %s - all SNPs on chr%s will be treated as unmatched.",
                     chrom, chrom))
 
-  # ---- Sample IDs (for initialising per-model PRS accumulators) ---------------
-  all_samples <- .geno_sample_ids(geno[1L, ])
+  # ---- Samples to score: IDs common to every file that will be queried --------
+  file_samples <- attr(geno, "samples")
+  used_paths   <- unique(geno$path[geno$chrom %in% setdiff(needed_chroms, missing_chroms)])
+  if (length(used_paths) > 0L) {
+    common           <- .common_samples(file_samples[used_paths], verbose)
+    scoring_samples  <- common$common
+    excluded_samples <- common$excluded
+  } else {   # nothing will be queried (every needed chromosome lacks a file)
+    scoring_samples  <- file_samples[[1L]]
+    excluded_samples <- character(0)
+  }
 
   # ---- Per-model accumulators ----------------------------------------------------
   zero_chrom_vec <- setNames(integer(length(all_chroms)), all_chroms)
@@ -150,7 +170,7 @@ compute_prs <- function(geno_dir   = ".",
   unmatched_rsIDs      <- setNames(rep(list(empty_rsid_list), length(pgs_list)), model_ids)
   excluded_chr_counts  <- setNames(rep(list(zero_chrom_vec),  length(pgs_list)), model_ids)
 
-  for (i in seq_along(pgs_list)) prs_total[[i]] <- setNames(numeric(length(all_samples)), all_samples)
+  for (i in seq_along(pgs_list)) prs_total[[i]] <- setNames(numeric(length(scoring_samples)), scoring_samples)
 
   # ---- Missing-chromosome SNPs are entirely unmatched --------------------------
   for (chrom in missing_chroms) {
@@ -206,18 +226,15 @@ compute_prs <- function(geno_dir   = ".",
       if (nrow(merged) == 0L) next
       is_ref <- merged$effect_allele == merged$REF
 
-      samp_cols <- setdiff(names(dosage_chrom), c("POS", "ID", "REF", "ALT"))
-
       # REF-effect formula: weight * (2 - dosage) = -weight * dosage + 2 * weight
       adj_weight     <- ifelse(is_ref, -merged$effect_weight, merged$effect_weight)
       ref_correction <- 2 * sum(merged$effect_weight[is_ref])
 
-      dos_mat     <- as.matrix(merged[, samp_cols, drop = FALSE])
+      # Only the samples common to every file; columns are in scoring_samples order,
+      # so this chromosome's scores line up with the running totals.
+      dos_mat     <- as.matrix(merged[, scoring_samples, drop = FALSE])
       prs_chrom   <- drop(t(dos_mat) %*% adj_weight) + ref_correction
-      names(prs_chrom) <- samp_cols
-
-      idx <- match(names(prs_chrom), names(prs_total[[m]]))
-      prs_total[[m]][idx] <- prs_total[[m]][idx] + prs_chrom
+      prs_total[[m]] <- prs_total[[m]] + prs_chrom
 
       if (verbose) {
         cat(sprintf("  %-12s : %d matched, %d excluded (allele mismatch), %d unmatched\n",
@@ -236,7 +253,8 @@ compute_prs <- function(geno_dir   = ".",
       prs                 = prs_total[[m]],
       unmatched_by_chr    = unmatched_by_chr[[m]],
       unmatched_rsIDs     = unmatched_rsIDs[[m]],
-      excluded_chr_counts = excluded_chr_counts[[m]]
+      excluded_chr_counts = excluded_chr_counts[[m]],
+      excluded_samples    = excluded_samples
     )
   }
 
@@ -423,16 +441,38 @@ compute_prs <- function(geno_dir   = ".",
                  chosen, geno_dir, paste(detail, collapse = "\n")))
   }
 
-  geno[order(match(geno$chrom, .chrom_sort(geno$chrom))), ]
+  samples <- attr(geno, "samples")
+  geno    <- geno[order(match(geno$chrom, .chrom_sort(geno$chrom))), ]
+  attr(geno, "samples") <- samples
+  geno
 }
 
-# Sample IDs available in a single geno data.frame row (one file).
-.geno_sample_ids <- function(geno_row) {
-  if (geno_row$format[1L] == "vcf") {
-    tabixr::vcf_samples(geno_row$path[1L])
-  } else {
-    .get_bdinfo(geno_row$path[1L])$samples$sid
-  }
+# Sample IDs to score: those present in EVERY file that will be queried.
+# Files often differ slightly (subjects dropped from some chromosomes for poor
+# imputation quality), and scores can only be summed across chromosomes over
+# subjects every file has. Order follows the first file. Stops if the
+# intersection is empty, which means the files are not from the same cohort or
+# their sample IDs are formatted differently.
+# 'samples_by_file' is a named list (name = path) of sample ID vectors.
+.common_samples <- function(samples_by_file, verbose) {
+  common   <- Reduce(intersect, samples_by_file)
+  excluded <- setdiff(unique(unlist(samples_by_file, use.names = FALSE)), common)
+
+  if (length(common) == 0L)
+    stop(paste0("No sample IDs are common to all the genotype files used, so nothing can be scored. ",
+                "Check that the files come from the same cohort and that sample IDs are formatted ",
+                "the same way in each:\n",
+                paste(sprintf("  %s: %d sample(s), e.g. %s", basename(names(samples_by_file)),
+                              lengths(samples_by_file),
+                              vapply(samples_by_file, function(s) paste(head(s, 2L), collapse = ", "), character(1L))),
+                      collapse = "\n")),
+         call. = FALSE)
+
+  if (verbose && length(excluded) > 0L)
+    cat(sprintf("\nSample IDs: scoring the %d sample(s) present in all %d genotype file(s) used; %d sample(s) missing from at least one file are excluded.\n",
+                length(common), length(samples_by_file), length(excluded)))
+
+  list(common = common, excluded = excluded)
 }
 
 # ---- VCF dosage retrieval (batched; subprocess-isolated off Windows) --------
@@ -452,6 +492,8 @@ compute_prs <- function(geno_dir   = ".",
 .query_batches_inprocess <- function(vcf_path, chrom, batches, verbose) {
   n_batches  <- length(batches)
   dosage_all <- NULL
+  # tabixr's data.frame can rename sample columns ("1001" -> "X1001"); the header has the true IDs.
+  sample_ids <- tabixr::vcf_samples(vcf_path)
 
   for (b in seq_along(batches)) {
     batch_pos <- batches[[b]]
@@ -468,7 +510,7 @@ compute_prs <- function(geno_dir   = ".",
     }
     if (verbose) cat(sprintf(" - %d VCF row(s)\n", nrow(matched)))
 
-    dos        <- extract_dosage(matched)
+    dos        <- extract_dosage(matched, sample_ids)
     rm(matched)
     dosage_all <- if (is.null(dosage_all)) dos else rbind(dosage_all, dos)
     rm(dos)
