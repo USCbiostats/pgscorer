@@ -12,8 +12,11 @@ Description: Computes polygenic risk scores (PRS) from PGS Catalog scoring
 License: MIT + file LICENSE
 Imports:
     tabixr,
-    data.table
+    data.table,
+    ggplot2,
+    base64enc
 Suggests:
-    BinaryDosage
+    BinaryDosage,
+    ragg
 Encoding: UTF-8
 RoxygenNote: 7.3.3

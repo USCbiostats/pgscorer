@@ -3,7 +3,9 @@
 #' Writes an HTML file summarizing the results returned by
 #' \code{\link{compute_prs}}. The report opens with a statement of what was
 #' done, followed by the list of PGS Catalog models that were fitted (with the
-#' number of SNPs in each) and a table of SNPs by chromosome for each model.
+#' number of SNPs in each), a table of SNPs by chromosome for each model,
+#' a histogram of the PRS for each model, and a table of R-squared between the
+#' PRS of each pair of models.
 #'
 #' The results must contain \code{n_snps} and \code{n_snps_by_chr}, as returned
 #' by the current \code{compute_prs()}.
@@ -96,6 +98,42 @@ prs_summary <- function(results, trait, data_name, file = "prs_summary.html") {
            "effect allele matching neither REF nor ALT).</p>")
   )
 
+  # R-squared between every pair of models: squared Pearson correlation of the
+  # PRS over the subjects scored by all of them, matched by subject ID.
+  ids <- Reduce(intersect, lapply(results, function(r) names(r$prs)))
+  if (length(ids) == 0L) {
+    ids <- NULL
+    if (length(unique(lengths(lapply(results, `[[`, "prs")))) != 1L)
+      stop("cannot compare models: PRS vectors are unnamed and differ in length", call. = FALSE)
+  }
+  prs_mat <- vapply(results, function(r) as.numeric(if (is.null(ids)) r$prs else r$prs[ids]),
+                    numeric(if (is.null(ids)) length(results[[1L]]$prs) else length(ids)))
+  r2 <- stats::cor(prs_mat)^2
+  dimnames(r2) <- list(models, models)
+
+  r2_table <- c(
+    "<table>",
+    paste0("<thead><tr><th></th>", paste0("<th>", esc(models), "</th>", collapse = ""), "</tr></thead>"),
+    "<tbody>",
+    vapply(seq_along(models), function(i)
+      paste0("<tr><th scope=\"row\">", esc(models[i]), "</th>",
+             paste0("<td>", sprintf("%.3f", r2[i, ]), "</td>", collapse = ""), "</tr>"),
+      character(1L)),
+    "</tbody>",
+    "</table>",
+    sprintf(paste0("<p class=\"note\">Squared Pearson correlation of the PRS between each pair ",
+                   "of models, over the %s subjects scored by all of them.</p>"),
+            fmt(nrow(prs_mat)))
+  )
+
+  hist_figs <- vapply(models, function(m) {
+    prs <- results[[m]]$prs
+    sprintf(paste0("<figure><img alt=\"Histogram of PRS for %s\" src=\"%s\">",
+                   "<figcaption>n = %s &middot; mean %s &middot; SD %s</figcaption></figure>"),
+            esc(m), .prs_histogram(prs, m), fmt(length(prs)),
+            signif(mean(prs), 3), signif(stats::sd(prs), 3))
+  }, character(1L))
+
   html <- c(
     "<!DOCTYPE html>",
     "<html lang=\"en\">",
@@ -104,7 +142,10 @@ prs_summary <- function(results, trait, data_name, file = "prs_summary.html") {
     "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
     sprintf("<title>PRS Summary: %s</title>", esc(trait)),
     "<style>",
-    "body { font-family: system-ui, sans-serif; max-width: 48rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; color: #222; }",
+    "body { font-family: system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; color: #222; }",
+    ".plots { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1.5rem; }",
+    "figure { margin: 0; } figure img { width: 100%; height: auto; display: block; }",
+    "figcaption { font-size: 0.85rem; color: #52514e; font-variant-numeric: tabular-nums; }",
     "h1 { font-size: 1.6rem; } h2 { font-size: 1.2rem; margin-top: 2rem; }",
     "li { font-family: ui-monospace, Consolas, monospace; }",
     "table { border-collapse: collapse; font-variant-numeric: tabular-nums; }",
@@ -125,9 +166,42 @@ prs_summary <- function(results, trait, data_name, file = "prs_summary.html") {
     "</ul>",
     "<h2>SNPs by chromosome</h2>",
     chr_table,
+    "<h2>PRS distributions</h2>",
+    "<div class=\"plots\">",
+    hist_figs,
+    "</div>",
+    "<h2>Agreement between models (R&sup2;)</h2>",
+    r2_table,
     "</body>",
     "</html>"
   )
   writeLines(html, file, useBytes = TRUE)
   invisible(file)
+}
+
+# Histogram of one model's PRS as a base64 PNG data URI, so the report is a
+# single self-contained file. One series, so no legend; the model is the title.
+#' @importFrom ggplot2 .data
+.prs_histogram <- function(prs, model) {
+  ink <- "#0b0b0b"; ink2 <- "#52514e"; surface <- "#fcfcfb"
+  p <- ggplot2::ggplot(data.frame(prs = prs), ggplot2::aes(x = .data$prs)) +
+    ggplot2::geom_histogram(bins = 40, fill = "#2a78d6", colour = surface, linewidth = 0.25) +
+    ggplot2::labs(title = model, x = "Polygenic risk score", y = "Number of subjects") +
+    ggplot2::scale_y_continuous(labels = function(x) format(x, big.mark = ",", scientific = FALSE),
+                                expand = ggplot2::expansion(mult = c(0, 0.05))) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.background    = ggplot2::element_rect(fill = surface, colour = NA),
+      panel.grid.major.x = ggplot2::element_blank(),
+      panel.grid.minor   = ggplot2::element_blank(),
+      panel.grid.major.y = ggplot2::element_line(colour = "#e4e3df", linewidth = 0.3),
+      plot.title         = ggplot2::element_text(colour = ink, face = "bold", size = 12),
+      axis.title         = ggplot2::element_text(colour = ink2),
+      axis.text          = ggplot2::element_text(colour = ink2)
+    )
+  tmp <- tempfile(fileext = ".png")
+  on.exit(unlink(tmp), add = TRUE)
+  device <- if (requireNamespace("ragg", quietly = TRUE)) ragg::agg_png else "png"
+  ggplot2::ggsave(tmp, p, device = device, width = 6, height = 3.6, dpi = 150)
+  base64enc::dataURI(file = tmp, mime = "image/png")
 }

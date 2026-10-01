@@ -26,7 +26,9 @@ The path of the HTML file, invisibly.
 Writes an HTML file summarizing the results returned by
 \code{\link{compute_prs}}. The report opens with a statement of what was
 done, followed by the list of PGS Catalog models that were fitted (with the
-number of SNPs in each) and a table of SNPs by chromosome for each model.
+number of SNPs in each), a table of SNPs by chromosome for each model,
+a histogram of the PRS for each model, and a table of R-squared between the
+PRS of each pair of models.
 }
 \details{
 The results must contain \code{n_snps} and \code{n_snps_by_chr}, as returned
