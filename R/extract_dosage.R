@@ -1,7 +1,7 @@
 #' Extract DS (Dosage) Values from a VCF Data Frame
 #'
-#' Takes the data.frame returned by \code{\link[tabixr]{query_vcf_positions}}
-#' (or \code{\link[tabixr]{query_vcf}}) and returns a slimmed data.frame with
+#' Takes the data.frame returned by \code{tabixr::query_vcf_positions()}
+#' (or \code{tabixr::query_vcf()}) and returns a slimmed data.frame with
 #' columns \code{POS}, \code{ID}, \code{REF}, \code{ALT}, and one numeric
 #' column per sample containing the \code{DS} dosage value.
 #'

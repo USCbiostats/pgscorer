@@ -92,6 +92,8 @@
 #'       effect allele matched neither REF nor ALT.}
 #'   }
 #'
+#' @importFrom stats setNames
+#' @importFrom utils head
 #' @export
 compute_prs <- function(geno_dir   = ".",
                         format     = NULL,
