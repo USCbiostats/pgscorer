@@ -126,6 +126,16 @@ prs_summary <- function(results, trait, data_name, file = "prs_summary.html") {
             fmt(nrow(prs_mat)))
   )
 
+  # One scatter per unordered pair of models (n*(n-1)/2), never a model against itself.
+  pairs <- if (length(models) >= 2L) utils::combn(models, 2L, simplify = FALSE) else list()
+  scatter_figs <- vapply(pairs, function(pr)
+    sprintf(paste0("<figure><img alt=\"Scatter plot of PRS for %s against %s\" src=\"%s\">",
+                   "<figcaption>R&sup2; = %.3f</figcaption></figure>"),
+            esc(pr[2L]), esc(pr[1L]),
+            .prs_scatter(prs_mat[, pr[1L]], prs_mat[, pr[2L]], pr[1L], pr[2L]),
+            r2[pr[1L], pr[2L]]),
+    character(1L))
+
   hist_figs <- vapply(models, function(m) {
     prs <- results[[m]]$prs
     sprintf(paste0("<figure><img alt=\"Histogram of PRS for %s\" src=\"%s\">",
@@ -172,6 +182,8 @@ prs_summary <- function(results, trait, data_name, file = "prs_summary.html") {
     "</div>",
     "<h2>Agreement between models (R&sup2;)</h2>",
     r2_table,
+    if (length(pairs) > 0L) c("<h2>Pairwise comparison of PRS</h2>",
+                              "<div class=\"plots\">", scatter_figs, "</div>"),
     "</body>",
     "</html>"
   )
@@ -179,29 +191,49 @@ prs_summary <- function(results, trait, data_name, file = "prs_summary.html") {
   invisible(file)
 }
 
-# Histogram of one model's PRS as a base64 PNG data URI, so the report is a
-# single self-contained file. One series, so no legend; the model is the title.
-#' @importFrom ggplot2 .data
-.prs_histogram <- function(prs, model) {
-  ink <- "#0b0b0b"; ink2 <- "#52514e"; surface <- "#fcfcfb"
-  p <- ggplot2::ggplot(data.frame(prs = prs), ggplot2::aes(x = .data$prs)) +
-    ggplot2::geom_histogram(bins = 40, fill = "#2a78d6", colour = surface, linewidth = 0.25) +
-    ggplot2::labs(title = model, x = "Polygenic risk score", y = "Number of subjects") +
-    ggplot2::scale_y_continuous(labels = function(x) format(x, big.mark = ",", scientific = FALSE),
-                                expand = ggplot2::expansion(mult = c(0, 0.05))) +
-    ggplot2::theme_minimal(base_size = 11) +
+# Plot styling shared by the report's charts: one series per chart, so no
+# legend; recessive horizontal grid; text in ink tokens, never the series color.
+.prs_theme <- function() {
+  ggplot2::theme_minimal(base_size = 11) +
     ggplot2::theme(
-      plot.background    = ggplot2::element_rect(fill = surface, colour = NA),
+      plot.background    = ggplot2::element_rect(fill = "#fcfcfb", colour = NA),
       panel.grid.major.x = ggplot2::element_blank(),
       panel.grid.minor   = ggplot2::element_blank(),
       panel.grid.major.y = ggplot2::element_line(colour = "#e4e3df", linewidth = 0.3),
-      plot.title         = ggplot2::element_text(colour = ink, face = "bold", size = 12),
-      axis.title         = ggplot2::element_text(colour = ink2),
-      axis.text          = ggplot2::element_text(colour = ink2)
+      plot.title         = ggplot2::element_text(colour = "#0b0b0b", face = "bold", size = 12),
+      axis.title         = ggplot2::element_text(colour = "#52514e"),
+      axis.text          = ggplot2::element_text(colour = "#52514e")
     )
+}
+
+# Render a ggplot to a base64 PNG data URI, so the report is one self-contained file.
+.plot_uri <- function(p, width = 6, height = 3.6) {
   tmp <- tempfile(fileext = ".png")
   on.exit(unlink(tmp), add = TRUE)
   device <- if (requireNamespace("ragg", quietly = TRUE)) ragg::agg_png else "png"
-  ggplot2::ggsave(tmp, p, device = device, width = 6, height = 3.6, dpi = 150)
+  ggplot2::ggsave(tmp, p, device = device, width = width, height = height, dpi = 150)
   base64enc::dataURI(file = tmp, mime = "image/png")
+}
+
+# Histogram of one model's PRS.
+#' @importFrom ggplot2 .data
+.prs_histogram <- function(prs, model) {
+  p <- ggplot2::ggplot(data.frame(prs = prs), ggplot2::aes(x = .data$prs)) +
+    ggplot2::geom_histogram(bins = 40, fill = "#2a78d6", colour = "#fcfcfb", linewidth = 0.25) +
+    ggplot2::labs(title = model, x = "Polygenic risk score", y = "Number of subjects") +
+    ggplot2::scale_y_continuous(labels = function(x) format(x, big.mark = ",", scientific = FALSE),
+                                expand = ggplot2::expansion(mult = c(0, 0.05))) +
+    .prs_theme()
+  .plot_uri(p)
+}
+
+# Scatter of one model's PRS against another's, each axis on its own range (the
+# models' scores can differ in scale). Many points, so small and translucent.
+.prs_scatter <- function(x, y, x_model, y_model) {
+  p <- ggplot2::ggplot(data.frame(x = x, y = y), ggplot2::aes(x = .data$x, y = .data$y)) +
+    ggplot2::geom_point(colour = "#2a78d6", size = 0.4, alpha = 0.15, shape = 16) +
+    ggplot2::labs(title = sprintf("%s vs %s", y_model, x_model), x = x_model, y = y_model) +
+    .prs_theme() +
+    ggplot2::theme(panel.grid.major.x = ggplot2::element_line(colour = "#e4e3df", linewidth = 0.3))
+  .plot_uri(p, width = 4.5, height = 4.5)
 }
