@@ -53,6 +53,10 @@ A named list (invisibly), one element per model, each itself a list
   \describe{
     \item{prs}{Named numeric vector of PRS values, one per scored sample
       (those present in every genotype file that was queried).}
+    \item{n_snps}{Integer; the number of SNPs in the model (rows of the PGS
+      file with a usable position).}
+    \item{n_snps_by_chr}{Named integer vector, same chromosome set as
+      \code{unmatched_by_chr}: \code{n_snps} split by chromosome.}
     \item{excluded_samples}{Character vector of sample IDs left out because
       they were missing from at least one queried file (the same for every
       model); empty when all files have the same samples.}

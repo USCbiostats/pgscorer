@@ -78,6 +78,10 @@
 #'   \describe{
 #'     \item{prs}{Named numeric vector of PRS values, one per scored sample
 #'       (those present in every genotype file that was queried).}
+#'     \item{n_snps}{Integer; the number of SNPs in the model (rows of the PGS
+#'       file with a usable position).}
+#'     \item{n_snps_by_chr}{Named integer vector, same chromosome set as
+#'       \code{unmatched_by_chr}: \code{n_snps} split by chromosome.}
 #'     \item{excluded_samples}{Character vector of sample IDs left out because
 #'       they were missing from at least one queried file (the same for every
 #'       model); empty when all files have the same samples.}
@@ -178,6 +182,8 @@ compute_prs <- function(geno_dir   = ".",
   unmatched_rsIDs      <- setNames(rep(list(empty_rsid_list), length(pgs_list)), model_ids)
   excluded_chr_counts  <- setNames(rep(list(zero_chrom_vec),  length(pgs_list)), model_ids)
 
+  n_snps_by_chr        <- lapply(pgs_list, .count_snps_by_chr, chroms = all_chroms)
+
   for (i in seq_along(pgs_list)) prs_total[[i]] <- setNames(numeric(length(scoring_samples)), scoring_samples)
 
   # ---- Missing-chromosome SNPs are entirely unmatched --------------------------
@@ -248,6 +254,8 @@ compute_prs <- function(geno_dir   = ".",
   for (m in model_ids) {
     results[[m]] <- list(
       prs                 = prs_total[[m]],
+      n_snps              = sum(n_snps_by_chr[[m]]),
+      n_snps_by_chr       = n_snps_by_chr[[m]],
       unmatched_by_chr    = unmatched_by_chr[[m]],
       unmatched_rsIDs     = unmatched_rsIDs[[m]],
       excluded_chr_counts = excluded_chr_counts[[m]],
@@ -273,6 +281,14 @@ compute_prs <- function(geno_dir   = ".",
 # Strip a leading "chr" (case-insensitive) and coerce to character.
 .norm_chrom <- function(x) {
   sub("^chr", "", as.character(x), ignore.case = TRUE)
+}
+
+# Number of a model's SNPs on each chromosome in `chroms` (zero where none).
+# `pgs` must have chr_name already normalised with .norm_chrom().
+.count_snps_by_chr <- function(pgs, chroms) {
+  stopifnot(all(pgs$chr_name %in% chroms))
+  counts <- table(factor(pgs$chr_name, levels = chroms))
+  setNames(as.integer(counts), chroms)
 }
 
 # Sort chromosome labels: numeric ones in numeric order, then the rest
