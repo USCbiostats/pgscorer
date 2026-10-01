@@ -77,6 +77,21 @@ Sample IDs are used exactly as stored, including purely numeric IDs (`1001`), fo
 
 A model may reference a chromosome for which no matching genotype file exists in `geno_dir`. Rather than erroring, every SNP on that chromosome is reported as unmatched (in `unmatched_by_chr` / `unmatched_rsIDs`) and a warning is printed.
 
+### Scores as a table
+
+`prs_table()` turns the list returned by `compute_prs()` (or one read back with `readRDS()`) into a data.frame with one row per subject, a `subject_id` column, and one column of scores per model named after the model:
+
+```r
+results <- compute_prs("path/to/genotypes", pgs_dir = "path/to/models")
+prs_df  <- prs_table(results)
+#>   subject_id PGS000314 PGS000675 PGS001946
+#> 1    1000001     0.412    -1.207     0.033
+#> 2    1000002    -0.098     0.551     0.290
+#> ...
+```
+
+Scores are matched to subjects by ID, and model names are used exactly as given (they are not rewritten into valid R names). If the list was assembled from separate runs whose subjects differ (`c(run1, run2)`), every subject in any model is kept with `NA` for models that did not score them, and a warning says how many. Use `id_column = "IID"` to name the ID column something else. Subjects left out of a run because a genotype file lacked them are listed in `results[[1]]$excluded_samples`, not in the table.
+
 ### Output files
 
 When `output_dir` is not `NULL`, one RDS file is written per model:
