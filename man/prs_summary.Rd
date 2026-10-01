@@ -25,7 +25,12 @@ The path of the HTML file, invisibly.
 \description{
 Writes an HTML file summarizing the results returned by
 \code{\link{compute_prs}}. The report opens with a statement of what was
-done, followed by the list of PGS Catalog models that were fitted.
+done, followed by the list of PGS Catalog models that were fitted (with the
+number of SNPs in each) and a table of SNPs by chromosome for each model.
+}
+\details{
+The results must contain \code{n_snps} and \code{n_snps_by_chr}, as returned
+by the current \code{compute_prs()}.
 }
 \examples{
 \dontrun{
