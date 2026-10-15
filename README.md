@@ -14,7 +14,9 @@ remotes::install_github("USCbiostats/pgscorer")
 
 - [tabixr](https://github.com/USCbiostats/tabixr) (Bioconductor) — BGZF/Tabix VCF queries
 - [data.table](https://cran.r-project.org/package=data.table) — fast PGS file reading
+- [ggplot2](https://cran.r-project.org/package=ggplot2) and [base64enc](https://cran.r-project.org/package=base64enc) — plots in `prs_summary()` and the app
 - [BinaryDosage](https://cran.r-project.org/package=BinaryDosage) (CRAN) — only required when scoring against `.bdose` files
+- [shiny](https://cran.r-project.org/package=shiny) (CRAN) — only required for `run_prs_app()`; [ragg](https://cran.r-project.org/package=ragg) is optional and improves plot rendering
 
 ## Usage
 
@@ -92,6 +94,25 @@ prs_df  <- prs_table(results)
 
 Scores are matched to subjects by ID, and model names are used exactly as given (they are not rewritten into valid R names). If the list was assembled from separate runs whose subjects differ (`c(run1, run2)`), every subject in any model is kept with `NA` for models that did not score them, and a warning says how many. Use `id_column = "IID"` to name the ID column something else. Subjects left out of a run because a genotype file lacked them are listed in `results[[1]]$excluded_samples`, not in the table.
 
+### Exploring results in an app
+
+`run_prs_app()` opens a [Shiny](https://shiny.posit.co/) app for looking at the results of `compute_prs()`. It is meant for results with many models, where a single static report becomes unwieldy.
+
+```r
+run_prs_app()                    # choose the results file in the app
+run_prs_app("results.rds")       # or open a file straight away
+```
+
+The input is an `.rds` file holding the list returned by `compute_prs()`, e.g. `saveRDS(results, "results.rds")`. Large files are fine: the app lifts Shiny's default 5 MB upload limit. The app has three tabs:
+
+- **Summary** — the sentence "The following is a summary of the results of fitting the PGS catalog models for *trait*", the number of models and subjects, a table of the models with their SNP counts, and a table of SNPs by chromosome for every model. The trait name is a text box that defaults to the name of the results file (without `.rds`); edit it to change the sentence. In both tables the number of SNPs **not included** in the PRS (no matching genotype record, or an effect allele matching neither REF nor ALT) is shown in dark red with its percentage in parentheses.
+- **Histogram** — pick one model and see the distribution of its PRS, with the number of subjects, mean and SD.
+- **Scatter** — pick a model for the x-axis and another for the y-axis (they must differ) and see their PRS plotted against each other, with the R² between them and the number of subjects both scored. Subjects are matched by ID.
+
+The SNP counts come from `n_snps` and `n_snps_by_chr`, which `compute_prs()` now returns. Results saved by an older version lack them; the Summary tab then says so and leaves out those tables, and the other two tabs still work.
+
+`shiny` is only needed for this function (it is a suggested package, not a required one), and `ragg`, if installed, gives smoother plots.
+
 ### Output files
 
 When `output_dir` is not `NULL`, one RDS file is written per model:
@@ -100,7 +121,7 @@ When `output_dir` is not `NULL`, one RDS file is written per model:
 pgs_<model>_prs.rds
 ```
 
-Each file contains that model's full result list (`prs`, `unmatched_by_chr`, `unmatched_rsIDs`, `excluded_chr_counts`), not just the PRS vector.
+Each file contains that model's full result list (`prs`, `n_snps`, `n_snps_by_chr`, `unmatched_by_chr`, `unmatched_rsIDs`, `excluded_chr_counts`, `excluded_samples`), not just the PRS vector. `n_snps` is the number of SNPs in the model and `n_snps_by_chr` splits it by chromosome.
 
 ### Checking a genotype directory first
 
