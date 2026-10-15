@@ -39,11 +39,7 @@ prs_summary <- function(results, trait, data_name, file = "prs_summary.html") {
       stop(sprintf("%s must be a single non-empty string", arg), call. = FALSE)
   }
 
-  esc <- function(x) {
-    x <- gsub("&", "&amp;", x, fixed = TRUE)
-    x <- gsub("<", "&lt;",  x, fixed = TRUE)
-    gsub(">", "&gt;", x, fixed = TRUE)
-  }
+  esc <- .html_esc
 
   models <- names(results)
   if (!all(vapply(results, function(r) !is.null(r$n_snps) && !is.null(r$n_snps_by_chr), logical(1L))))
@@ -51,63 +47,13 @@ prs_summary <- function(results, trait, data_name, file = "prs_summary.html") {
          "add them with add_snp_counts.R or re-run compute_prs()", call. = FALSE)
 
   n_snps <- vapply(results, function(r) as.numeric(r$n_snps), numeric(1L))
-  fmt    <- function(x) formatC(x, format = "d", big.mark = ",")
+  fmt    <- .fmt_int
 
-  # SNPs by chromosome: one row per chromosome, one column per model. The
-  # chromosome set is the union across models, in the order first seen.
-  chroms <- unique(unlist(lapply(results, function(r) names(r$n_snps_by_chr)), use.names = FALSE))
-  by_chr <- vapply(results, function(r) {
-    v <- r$n_snps_by_chr[chroms]
-    v[is.na(v)] <- 0L
-    as.numeric(v)
-  }, numeric(length(chroms)))
-  by_chr <- matrix(by_chr, nrow = length(chroms), dimnames = list(chroms, models))
-
-  # SNPs not used in the score, same layout: those with no genotype record
-  # (unmatched) plus those whose effect allele matched neither REF nor ALT.
-  skipped <- vapply(results, function(r) {
-    v <- as.numeric(r$unmatched_by_chr[chroms]) + as.numeric(r$excluded_chr_counts[chroms])
-    v[is.na(v)] <- 0
-    v
-  }, numeric(length(chroms)))
-  skipped <- matrix(skipped, nrow = length(chroms), dimnames = list(chroms, models))
-  # Percent of SNPs not included; "<0.1%" rather than "0.0%" when some, but very few, are.
-  pct <- function(n, s) {
-    p <- ifelse(n > 0, 100 * s / n, 0)
-    ifelse(s > 0 & p < 0.1, "&lt;0.1%", sprintf("%.1f%%", p))
-  }
-  cell <- function(n, s)
-    paste0("<td>", fmt(n), "<br><span class=\"skip\">", fmt(s), "</span> (", pct(n, s), ")</td>",
-           collapse = "")
-
-  chr_table <- c(
-    "<table>",
-    paste0("<thead><tr><th>Chromosome</th>",
-           paste0("<th>", esc(models), "</th>", collapse = ""), "</tr></thead>"),
-    "<tbody>",
-    vapply(seq_along(chroms), function(i)
-      paste0("<tr><th scope=\"row\">", esc(chroms[i]), "</th>",
-             cell(by_chr[i, ], skipped[i, ]), "</tr>"),
-      character(1L)),
-    "</tbody>",
-    paste0("<tfoot><tr><th scope=\"row\">Total</th>",
-           cell(colSums(by_chr), colSums(skipped)), "</tr></tfoot>"),
-    "</table>",
-    paste0("<p class=\"note\">Black: SNPs in the model. <span class=\"skip\">Dark red</span>, with the percent of the total in parentheses: ",
-           "SNPs not included in the PRS calculation (no matching genotype record, or an ",
-           "effect allele matching neither REF nor ALT).</p>")
-  )
+  chr_table <- .chr_snp_table_html(results)
 
   # R-squared between every pair of models: squared Pearson correlation of the
   # PRS over the subjects scored by all of them, matched by subject ID.
-  ids <- Reduce(intersect, lapply(results, function(r) names(r$prs)))
-  if (length(ids) == 0L) {
-    ids <- NULL
-    if (length(unique(lengths(lapply(results, `[[`, "prs")))) != 1L)
-      stop("cannot compare models: PRS vectors are unnamed and differ in length", call. = FALSE)
-  }
-  prs_mat <- vapply(results, function(r) as.numeric(if (is.null(ids)) r$prs else r$prs[ids]),
-                    numeric(if (is.null(ids)) length(results[[1L]]$prs) else length(ids)))
+  prs_mat <- .prs_matrix(results)
   r2 <- stats::cor(prs_mat)^2
   dimnames(r2) <- list(models, models)
 
@@ -215,25 +161,110 @@ prs_summary <- function(results, trait, data_name, file = "prs_summary.html") {
   base64enc::dataURI(file = tmp, mime = "image/png")
 }
 
-# Histogram of one model's PRS.
+# HTML for the SNPs-by-chromosome table: one row per chromosome, one column per
+# model, each cell the SNP count with the number (and percent) not used in the
+# score beneath it in dark red. Includes the explanatory note. Needs n_snps_by_chr,
+# unmatched_by_chr and excluded_chr_counts in every element of `results`.
+.chr_snp_table_html <- function(results) {
+  esc    <- .html_esc
+  fmt    <- .fmt_int
+  models <- names(results)
+
+  # SNPs by chromosome: one row per chromosome, one column per model. The
+  # chromosome set is the union across models, in the order first seen.
+  chroms <- unique(unlist(lapply(results, function(r) names(r$n_snps_by_chr)), use.names = FALSE))
+  by_chr <- vapply(results, function(r) {
+    v <- r$n_snps_by_chr[chroms]
+    v[is.na(v)] <- 0L
+    as.numeric(v)
+  }, numeric(length(chroms)))
+  by_chr <- matrix(by_chr, nrow = length(chroms), dimnames = list(chroms, models))
+
+  # SNPs not used in the score, same layout: those with no genotype record
+  # (unmatched) plus those whose effect allele matched neither REF nor ALT.
+  skipped <- vapply(results, function(r) {
+    v <- as.numeric(r$unmatched_by_chr[chroms]) + as.numeric(r$excluded_chr_counts[chroms])
+    v[is.na(v)] <- 0
+    v
+  }, numeric(length(chroms)))
+  skipped <- matrix(skipped, nrow = length(chroms), dimnames = list(chroms, models))
+  # Percent of SNPs not included; "<0.1%" rather than "0.0%" when some, but very few, are.
+  pct <- function(n, s) {
+    p <- ifelse(n > 0, 100 * s / n, 0)
+    ifelse(s > 0 & p < 0.1, "&lt;0.1%", sprintf("%.1f%%", p))
+  }
+  cell <- function(n, s)
+    paste0("<td>", fmt(n), "<br><span class=\"skip\">", fmt(s), "</span> (", pct(n, s), ")</td>",
+           collapse = "")
+
+  chr_table <- c(
+    "<table>",
+    paste0("<thead><tr><th>Chromosome</th>",
+           paste0("<th>", esc(models), "</th>", collapse = ""), "</tr></thead>"),
+    "<tbody>",
+    vapply(seq_along(chroms), function(i)
+      paste0("<tr><th scope=\"row\">", esc(chroms[i]), "</th>",
+             cell(by_chr[i, ], skipped[i, ]), "</tr>"),
+      character(1L)),
+    "</tbody>",
+    paste0("<tfoot><tr><th scope=\"row\">Total</th>",
+           cell(colSums(by_chr), colSums(skipped)), "</tr></tfoot>"),
+    "</table>",
+    paste0("<p class=\"note\">Black: SNPs in the model. <span class=\"skip\">Dark red</span>, with the percent of the total in parentheses: ",
+           "SNPs not included in the PRS calculation (no matching genotype record, or an ",
+           "effect allele matching neither REF nor ALT).</p>")
+  )
+  chr_table
+}
+
+# Shared formatting helpers.
+.html_esc <- function(x) {
+  x <- gsub("&", "&amp;", x, fixed = TRUE)
+  x <- gsub("<", "&lt;",  x, fixed = TRUE)
+  gsub(">", "&gt;", x, fixed = TRUE)
+}
+.fmt_int <- function(x) formatC(x, format = "d", big.mark = ",")
+
+# PRS of every model as columns of a matrix, over the subjects scored by all of
+# them, matched by subject ID (by position when the vectors are unnamed).
+.prs_matrix <- function(results) {
+  ids <- Reduce(intersect, lapply(results, function(r) names(r$prs)))
+  if (length(ids) == 0L) {
+    ids <- NULL
+    if (length(unique(lengths(lapply(results, `[[`, "prs")))) != 1L)
+      stop("cannot compare models: PRS vectors are unnamed and differ in length", call. = FALSE)
+  }
+  n <- if (is.null(ids)) length(results[[1L]]$prs) else length(ids)
+  vapply(results, function(r) as.numeric(if (is.null(ids)) r$prs else r$prs[ids]), numeric(n))
+}
+
+# PRS of two models over the subjects scored by both, matched by subject ID.
+.prs_pair <- function(results, a, b) {
+  m <- .prs_matrix(results[c(a, b)])
+  list(x = m[, 1L], y = m[, 2L])
+}
+
+# Histogram of one model's PRS (a ggplot).
 #' @importFrom ggplot2 .data
-.prs_histogram <- function(prs, model) {
-  p <- ggplot2::ggplot(data.frame(prs = prs), ggplot2::aes(x = .data$prs)) +
+.prs_histogram_plot <- function(prs, model) {
+  ggplot2::ggplot(data.frame(prs = prs), ggplot2::aes(x = .data$prs)) +
     ggplot2::geom_histogram(bins = 40, fill = "#2a78d6", colour = "#fcfcfb", linewidth = 0.25) +
     ggplot2::labs(title = model, x = "Polygenic risk score", y = "Number of subjects") +
     ggplot2::scale_y_continuous(labels = function(x) format(x, big.mark = ",", scientific = FALSE),
                                 expand = ggplot2::expansion(mult = c(0, 0.05))) +
     .prs_theme()
-  .plot_uri(p)
 }
+.prs_histogram <- function(prs, model) .plot_uri(.prs_histogram_plot(prs, model))
 
-# Scatter of one model's PRS against another's, each axis on its own range (the
-# models' scores can differ in scale). Many points, so small and translucent.
-.prs_scatter <- function(x, y, x_model, y_model) {
-  p <- ggplot2::ggplot(data.frame(x = x, y = y), ggplot2::aes(x = .data$x, y = .data$y)) +
+# Scatter of one model's PRS against another's (a ggplot), each axis on its own
+# range (the models' scores can differ in scale). Many points, so small and
+# translucent.
+.prs_scatter_plot <- function(x, y, x_model, y_model) {
+  ggplot2::ggplot(data.frame(x = x, y = y), ggplot2::aes(x = .data$x, y = .data$y)) +
     ggplot2::geom_point(colour = "#2a78d6", size = 0.4, alpha = 0.15, shape = 16) +
     ggplot2::labs(title = sprintf("%s vs %s", y_model, x_model), x = x_model, y = y_model) +
     .prs_theme() +
     ggplot2::theme(panel.grid.major.x = ggplot2::element_line(colour = "#e4e3df", linewidth = 0.3))
-  .plot_uri(p, width = 4.5, height = 4.5)
 }
+.prs_scatter <- function(x, y, x_model, y_model)
+  .plot_uri(.prs_scatter_plot(x, y, x_model, y_model), width = 4.5, height = 4.5)

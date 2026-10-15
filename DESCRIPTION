@@ -17,6 +17,7 @@ Imports:
     base64enc
 Suggests:
     BinaryDosage,
-    ragg
+    ragg,
+    shiny
 Encoding: UTF-8
 RoxygenNote: 7.3.3
