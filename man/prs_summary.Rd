@@ -4,7 +4,13 @@
 \alias{prs_summary}
 \title{Summarize PRS Results as an HTML Report}
 \usage{
-prs_summary(results, trait, data_name, file = "prs_summary.html")
+prs_summary(
+  results,
+  trait,
+  data_name,
+  file = "prs_summary.html",
+  bin_counts = FALSE
+)
 }
 \arguments{
 \item{results}{A named list as returned by \code{compute_prs()} (or read
@@ -18,6 +24,9 @@ on.}
 
 \item{file}{Path of the HTML file to write. Default
 \code{"prs_summary.html"}.}
+
+\item{bin_counts}{Logical; if \code{TRUE}, write the number of subjects in each
+bin above the bars of the histograms. Default \code{FALSE}.}
 }
 \value{
 The path of the HTML file, invisibly.

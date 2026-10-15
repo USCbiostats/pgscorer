@@ -7,7 +7,9 @@
 #'     (it defaults to the name of the results file), the models fitted with
 #'     their SNP counts, and a table of SNPs by chromosome for each model with
 #'     the number not included in the PRS in dark red.}
-#'   \item{Histogram}{Pick one model and see the distribution of its PRS.}
+#'   \item{Histogram}{Pick one model and see the distribution of its PRS. A
+#'     check box adds the number of subjects in each bin above the bars (off by
+#'     default).}
 #'   \item{Scatter}{Pick two models and see their PRS plotted against each
 #'     other, with the R-squared between them.}
 #' }
@@ -131,6 +133,7 @@ run_prs_app <- function(file = NULL, launch.browser = TRUE) {
       shiny::tabPanel("Histogram",
         shiny::br(),
         shiny::selectInput("hist_model", "Model", choices = NULL),
+        shiny::checkboxInput("bin_counts", "Show the number of subjects in each bin", value = FALSE),
         shiny::plotOutput("hist", height = "420px"),
         shiny::textOutput("hist_stats", container = function(...) shiny::div(class = "hist-stat", ...))),
       shiny::tabPanel("Scatter",
@@ -185,7 +188,7 @@ run_prs_app <- function(file = NULL, launch.browser = TRUE) {
       shiny::validate(shiny::need(!is.null(src()), prompt))
       m <- shiny::req(input$hist_model)
       shiny::req(m %in% names(results()))
-      .prs_histogram_plot(results()[[m]]$prs, m)
+      .prs_histogram_plot(results()[[m]]$prs, m, bin_counts = isTRUE(input$bin_counts))
     }, res = 110)
 
     output$hist_stats <- shiny::renderText({

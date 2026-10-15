@@ -18,6 +18,8 @@
 #'   on.
 #' @param file      Path of the HTML file to write. Default
 #'   \code{"prs_summary.html"}.
+#' @param bin_counts Logical; if \code{TRUE}, write the number of subjects in each
+#'   bin above the bars of the histograms. Default \code{FALSE}.
 #'
 #' @return The path of the HTML file, invisibly.
 #'
@@ -28,7 +30,10 @@
 #'             file = "prs_summary.html")
 #' }
 #' @export
-prs_summary <- function(results, trait, data_name, file = "prs_summary.html") {
+prs_summary <- function(results, trait, data_name, file = "prs_summary.html",
+                        bin_counts = FALSE) {
+  if (!is.logical(bin_counts) || length(bin_counts) != 1L || is.na(bin_counts))
+    stop("bin_counts must be TRUE or FALSE", call. = FALSE)
   if (!is.list(results) || length(results) == 0L)
     stop("results must be a non-empty list as returned by compute_prs()", call. = FALSE)
   if (is.null(names(results)) || any(is.na(names(results)) | !nzchar(names(results))))
@@ -86,7 +91,7 @@ prs_summary <- function(results, trait, data_name, file = "prs_summary.html") {
     prs <- results[[m]]$prs
     sprintf(paste0("<figure><img alt=\"Histogram of PRS for %s\" src=\"%s\">",
                    "<figcaption>n = %s &middot; mean %s &middot; SD %s</figcaption></figure>"),
-            esc(m), .prs_histogram(prs, m), fmt(length(prs)),
+            esc(m), .prs_histogram(prs, m, bin_counts), fmt(length(prs)),
             signif(mean(prs), 3), signif(stats::sd(prs), 3))
   }, character(1L))
 
@@ -246,15 +251,24 @@ prs_summary <- function(results, trait, data_name, file = "prs_summary.html") {
 
 # Histogram of one model's PRS (a ggplot).
 #' @importFrom ggplot2 .data
-.prs_histogram_plot <- function(prs, model) {
-  ggplot2::ggplot(data.frame(prs = prs), ggplot2::aes(x = .data$prs)) +
-    ggplot2::geom_histogram(bins = 40, fill = "#2a78d6", colour = "#fcfcfb", linewidth = 0.25) +
+.prs_histogram_plot <- function(prs, model, bin_counts = FALSE) {
+  p <- ggplot2::ggplot(data.frame(prs = prs), ggplot2::aes(x = .data$prs)) +
+    ggplot2::geom_histogram(bins = 40, fill = "#2a78d6", colour = "#fcfcfb", linewidth = 0.25)
+  if (bin_counts)
+    # Count above each bar, turned vertical so 40 labels do not collide; empty bins unlabeled.
+    p <- p + ggplot2::geom_text(
+      ggplot2::aes(label = ifelse(ggplot2::after_stat(.data$count) > 0,
+                                  formatC(ggplot2::after_stat(.data$count), format = "d", big.mark = ","), "")),
+      stat = "bin", bins = 40, angle = 90, hjust = -0.15, size = 2.5, colour = "#52514e")
+  p +
     ggplot2::labs(title = model, x = "Polygenic risk score", y = "Number of subjects") +
     ggplot2::scale_y_continuous(labels = function(x) format(x, big.mark = ",", scientific = FALSE),
-                                expand = ggplot2::expansion(mult = c(0, 0.05))) +
+                                # extra headroom for the labels when they are shown
+                                expand = ggplot2::expansion(mult = c(0, if (bin_counts) 0.16 else 0.05))) +
     .prs_theme()
 }
-.prs_histogram <- function(prs, model) .plot_uri(.prs_histogram_plot(prs, model))
+.prs_histogram <- function(prs, model, bin_counts = FALSE)
+  .plot_uri(.prs_histogram_plot(prs, model, bin_counts))
 
 # Scatter of one model's PRS against another's (a ggplot), each axis on its own
 # range (the models' scores can differ in scale). Dark, sizeable points so outliers

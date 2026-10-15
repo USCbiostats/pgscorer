@@ -25,7 +25,9 @@ Opens an interactive app for results saved from \code{\link{compute_prs}}
     (it defaults to the name of the results file), the models fitted with
     their SNP counts, and a table of SNPs by chromosome for each model with
     the number not included in the PRS in dark red.}
-  \item{Histogram}{Pick one model and see the distribution of its PRS.}
+  \item{Histogram}{Pick one model and see the distribution of its PRS. A
+    check box adds the number of subjects in each bin above the bars (off by
+    default).}
   \item{Scatter}{Pick two models and see their PRS plotted against each
     other, with the R-squared between them.}
 }

@@ -107,7 +107,7 @@ The report opens with "The following is a summary of the results of fitting the 
 
 - **Models fitted** — the model names, each with its number of SNPs.
 - **SNPs by chromosome** — a table with one column per model. Under each SNP count is the number of SNPs **not included** in the PRS (no matching genotype record, or an effect allele matching neither REF nor ALT) in dark red, with its percentage in parentheses; a percentage of less than 0.1% is shown as `<0.1%`. A final row gives the totals.
-- **PRS distributions** — a histogram of the PRS for each model, with the number of subjects, mean and SD.
+- **PRS distributions** — a histogram of the PRS for each model with the number of subjects, mean and SD. Set `bin_counts = TRUE` to also write the number of subjects in each bin above the bars.
 - **Agreement between models** — a table of R² (the squared Pearson correlation of the PRS) between every pair of models, over the subjects scored by all of them.
 - **Pairwise comparison of PRS** — a scatter plot for each pair of models, one per pair (never a model against itself), each with a least-squares trend line and captioned with its R².
 
@@ -125,7 +125,7 @@ run_prs_app("results.rds")       # or open a file straight away
 The input is an `.rds` file holding the list returned by `compute_prs()`, e.g. `saveRDS(results, "results.rds")`. Large files are fine: the app lifts Shiny's default 5 MB upload limit. The app has three tabs:
 
 - **Summary** — the sentence "The following is a summary of the results of fitting the PGS catalog models for *trait*", the number of models and subjects, a table of the models with their SNP counts, and a table of SNPs by chromosome for every model. The trait name is a text box that defaults to the name of the results file (without `.rds`); edit it to change the sentence. In both tables the number of SNPs **not included** in the PRS (no matching genotype record, or an effect allele matching neither REF nor ALT) is shown in dark red with its percentage in parentheses.
-- **Histogram** — pick one model and see the distribution of its PRS, with the number of subjects, mean, SD, minimum and maximum underneath in large type.
+- **Histogram** — pick one model and see the distribution of its PRS, with the number of subjects, mean, SD, minimum and maximum underneath in large type. Tick **Show the number of subjects in each bin** to write the count above each bar (off by default).
 - **Scatter** — pick a model for the x-axis and another for the y-axis (they must differ) and see their PRS plotted against each other with a least-squares trend line, with the R² between them and the number of subjects both scored. Subjects are matched by ID.
 
 The SNP counts come from `n_snps` and `n_snps_by_chr`, which `compute_prs()` now returns. Results saved by an older version lack them; the Summary tab then says so and leaves out those tables, and the other two tabs still work.
