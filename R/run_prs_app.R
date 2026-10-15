@@ -116,7 +116,8 @@ run_prs_app <- function(file = NULL, launch.browser = TRUE) {
     .skip { color: #8b0000; font-size: 0.9em; }
     .note { font-size: 0.9rem; color: #555; }
     .models { font-family: ui-monospace, Consolas, monospace; }
-    .stat { font-size: 1rem; font-variant-numeric: tabular-nums; margin: 0.5rem 0 1rem; }"
+    .stat { font-size: 16px; font-variant-numeric: tabular-nums; margin: 0.5rem 0 1rem; }
+    .hist-stat { font-size: 28px; line-height: 1.3; font-variant-numeric: tabular-nums; margin: 0.5rem 0 1rem; }"
 
   ui <- shiny::fluidPage(
     shiny::tags$head(shiny::tags$style(shiny::HTML(css))),
@@ -131,7 +132,7 @@ run_prs_app <- function(file = NULL, launch.browser = TRUE) {
         shiny::br(),
         shiny::selectInput("hist_model", "Model", choices = NULL),
         shiny::plotOutput("hist", height = "420px"),
-        shiny::textOutput("hist_stats", container = function(...) shiny::div(class = "stat", ...))),
+        shiny::textOutput("hist_stats", container = function(...) shiny::div(class = "hist-stat", ...))),
       shiny::tabPanel("Scatter",
         shiny::br(),
         shiny::fluidRow(
@@ -191,8 +192,8 @@ run_prs_app <- function(file = NULL, launch.browser = TRUE) {
       m <- shiny::req(input$hist_model)
       shiny::req(m %in% names(results()))
       p <- results()[[m]]$prs
-      sprintf("n = %s   mean = %s   SD = %s", .fmt_int(length(p)),
-              signif(mean(p), 3), signif(stats::sd(p), 3))
+      sprintf("n = %s   mean = %s   SD = %s   min = %s   max = %s", .fmt_int(length(p)),
+              signif(mean(p), 3), signif(stats::sd(p), 3), signif(min(p), 3), signif(max(p), 3))
     })
 
     # The two selected models' PRS over the subjects scored by both.
