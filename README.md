@@ -94,6 +94,25 @@ prs_df  <- prs_table(results)
 
 Scores are matched to subjects by ID, and model names are used exactly as given (they are not rewritten into valid R names). If the list was assembled from separate runs whose subjects differ (`c(run1, run2)`), every subject in any model is kept with `NA` for models that did not score them, and a warning says how many. Use `id_column = "IID"` to name the ID column something else. Subjects left out of a run because a genotype file lacked them are listed in `results[[1]]$excluded_samples`, not in the table.
 
+### A summary report
+
+`prs_summary()` writes the results of `compute_prs()` (or a list read back with `readRDS()`) to a single, self-contained HTML file that is easy to read and share. You give it a trait name and a name for the data set:
+
+```r
+results <- compute_prs("path/to/genotypes", pgs_dir = "path/to/models")
+prs_summary(results, trait = "Trait 1", data_name = "Sample", file = "prs_summary.html")
+```
+
+The report opens with "The following is a summary of the results of fitting the PGS catalog models for *trait* on the *data name* data", followed by:
+
+- **Models fitted** — the model names, each with its number of SNPs.
+- **SNPs by chromosome** — a table with one column per model. Under each SNP count is the number of SNPs **not included** in the PRS (no matching genotype record, or an effect allele matching neither REF nor ALT) in dark red, with its percentage in parentheses; a percentage of less than 0.1% is shown as `<0.1%`. A final row gives the totals.
+- **PRS distributions** — a histogram of the PRS for each model, with the number of subjects, mean and SD.
+- **Agreement between models** — a table of R² (the squared Pearson correlation of the PRS) between every pair of models, over the subjects scored by all of them.
+- **Pairwise comparison of PRS** — a scatter plot for each pair of models, one per pair (never a model against itself), each with a least-squares trend line and captioned with its R².
+
+The plots are embedded in the file as images, so it can be moved or emailed on its own. It needs the SNP counts that `compute_prs()` returns (`n_snps` and `n_snps_by_chr`) and stops with a message if they are missing. The report suits a handful of models: the number of scatter plots grows as *n*(*n* − 1)/2, so with many models (50 would give 1,225 plots) the file becomes large and slow to produce. For those, use the app described next.
+
 ### Exploring results in an app
 
 `run_prs_app()` opens a [Shiny](https://shiny.posit.co/) app for looking at the results of `compute_prs()`. It is meant for results with many models, where a single static report becomes unwieldy.
@@ -107,7 +126,7 @@ The input is an `.rds` file holding the list returned by `compute_prs()`, e.g. `
 
 - **Summary** — the sentence "The following is a summary of the results of fitting the PGS catalog models for *trait*", the number of models and subjects, a table of the models with their SNP counts, and a table of SNPs by chromosome for every model. The trait name is a text box that defaults to the name of the results file (without `.rds`); edit it to change the sentence. In both tables the number of SNPs **not included** in the PRS (no matching genotype record, or an effect allele matching neither REF nor ALT) is shown in dark red with its percentage in parentheses.
 - **Histogram** — pick one model and see the distribution of its PRS, with the number of subjects, mean, SD, minimum and maximum underneath in large type.
-- **Scatter** — pick a model for the x-axis and another for the y-axis (they must differ) and see their PRS plotted against each other, with the R² between them and the number of subjects both scored. Subjects are matched by ID.
+- **Scatter** — pick a model for the x-axis and another for the y-axis (they must differ) and see their PRS plotted against each other with a least-squares trend line, with the R² between them and the number of subjects both scored. Subjects are matched by ID.
 
 The SNP counts come from `n_snps` and `n_snps_by_chr`, which `compute_prs()` now returns. Results saved by an older version lack them; the Summary tab then says so and leaves out those tables, and the other two tabs still work.
 

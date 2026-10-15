@@ -257,11 +257,13 @@ prs_summary <- function(results, trait, data_name, file = "prs_summary.html") {
 .prs_histogram <- function(prs, model) .plot_uri(.prs_histogram_plot(prs, model))
 
 # Scatter of one model's PRS against another's (a ggplot), each axis on its own
-# range (the models' scores can differ in scale). Many points, so small and
-# translucent.
+# range (the models' scores can differ in scale). Dark, sizeable points so outliers
+# stand out, with a least-squares trend line.
 .prs_scatter_plot <- function(x, y, x_model, y_model) {
   ggplot2::ggplot(data.frame(x = x, y = y), ggplot2::aes(x = .data$x, y = .data$y)) +
-    ggplot2::geom_point(colour = "#2a78d6", size = 0.4, alpha = 0.15, shape = 16) +
+    ggplot2::geom_point(colour = "#1c5cab", size = 0.9, alpha = 0.4, shape = 16) +
+    ggplot2::geom_smooth(method = "lm", formula = y ~ x, se = FALSE,
+                         colour = "#eb6834", linewidth = 1) +
     ggplot2::labs(title = sprintf("%s vs %s", y_model, x_model), x = x_model, y = y_model) +
     .prs_theme() +
     ggplot2::theme(panel.grid.major.x = ggplot2::element_line(colour = "#e4e3df", linewidth = 0.3))
