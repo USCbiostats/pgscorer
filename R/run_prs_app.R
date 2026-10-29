@@ -168,11 +168,19 @@ run_prs_app <- function(file = NULL, launch.browser = TRUE) {
             shiny::textOutput("hist_stats", container = function(...) shiny::div(class = "hist-stat", ...))))),
       shiny::tabPanel("Scatter",
         shiny::br(),
+        # Two always-visible list boxes (see the Histogram tab): a click or arrow key updates
+        # the plot at once, with no Enter.
         shiny::fluidRow(
-          shiny::column(3, shiny::selectInput("x_model", "Model on x-axis", choices = NULL)),
-          shiny::column(3, shiny::selectInput("y_model", "Model on y-axis", choices = NULL))),
-        shiny::textOutput("r2", container = function(...) shiny::div(class = "stat", ...)),
-        shiny::plotOutput("scatter", height = "560px"))),
+          shiny::column(4,
+            shiny::fluidRow(
+              shiny::column(6, shiny::selectInput("x_model", "Model on x-axis", choices = NULL,
+                                                  selectize = FALSE, size = 14)),
+              shiny::column(6, shiny::selectInput("y_model", "Model on y-axis", choices = NULL,
+                                                  selectize = FALSE, size = 14))),
+            shiny::p(class = "note", "Click a model in each list.")),
+          shiny::column(8,
+            shiny::textOutput("r2", container = function(...) shiny::div(class = "stat", ...)),
+            shiny::plotOutput("scatter", height = "560px"))))),
     shiny::tags$hr(),
     shiny::p(class = "note", paste("pgscorer", version))
   )
