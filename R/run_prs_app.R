@@ -139,6 +139,9 @@ run_prs_app <- function(file = NULL, launch.browser = TRUE) {
       $(sel).trigger('change');
     });"
 
+  # The package version, shown in the footer so a run can be tied to the build that made it.
+  version <- tryCatch(as.character(utils::packageVersion("pgscorer")), error = function(e) "(version unknown)")
+
   ui <- shiny::fluidPage(
     shiny::tags$head(shiny::tags$style(shiny::HTML(css)), shiny::tags$script(shiny::HTML(arrow_keys))),
     shiny::titlePanel("Polygenic risk score results"),
@@ -163,7 +166,9 @@ run_prs_app <- function(file = NULL, launch.browser = TRUE) {
           shiny::column(3, shiny::selectInput("x_model", "Model on x-axis", choices = NULL)),
           shiny::column(3, shiny::selectInput("y_model", "Model on y-axis", choices = NULL))),
         shiny::textOutput("r2", container = function(...) shiny::div(class = "stat", ...)),
-        shiny::plotOutput("scatter", height = "560px")))
+        shiny::plotOutput("scatter", height = "560px"))),
+    shiny::tags$hr(),
+    shiny::p(class = "note", paste("pgscorer", version))
   )
 
   server <- function(input, output, session) {
