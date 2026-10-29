@@ -120,7 +120,28 @@ run_prs_app <- function(file = NULL, launch.browser = TRUE) {
     .models { font-family: ui-monospace, Consolas, monospace; }
     select[size] { width: 100%; }
     .stat { font-size: 16px; font-variant-numeric: tabular-nums; margin: 0.5rem 0 1rem; }
-    .hist-stat { font-size: 28px; line-height: 1.3; font-variant-numeric: tabular-nums; margin: 0.5rem 0 1rem; }"
+    .hist-stat { font-size: 28px; line-height: 1.3; font-variant-numeric: tabular-nums; margin: 0.5rem 0 1rem; }
+    #loading-msg { display: none; position: fixed; z-index: 1000; top: 30%; left: 50%; width: 460px;
+      margin-left: -230px; padding: 22px 26px; text-align: center; font-size: 20px; color: #0b0b0b;
+      background: #fcfcfb; border: 1px solid #2a78d6; border-radius: 6px; box-shadow: 0 4px 18px rgba(0,0,0,0.25); }
+    #loading-msg small { display: block; margin-top: 6px; font-size: 13px; color: #52514e; }
+    html.pgs-loading #loading-msg { display: block; }"
+
+  # The load blocks the R process, so a message sent from the server would not reach the browser
+  # until the load was over. The banner is therefore shown and hidden by the browser itself: on at
+  # once when a file was given at start-up, on when a file has been uploaded, and
+  # off when the server sends "pgs_loaded" (success or failure) once the file has been read.
+  loading_js <- paste0("
+    (function() {
+      var root = document.documentElement;", if (!is.null(file)) "
+      root.classList.add('pgs-loading');" else "", "
+      $(document).on('shiny:inputchanged', function(e) {
+        if (e.name === 'file') root.classList.add('pgs-loading');
+      });
+      $(document).on('shiny:connected', function() {
+        Shiny.addCustomMessageHandler('pgs_loaded', function(x) { root.classList.remove('pgs-loading'); });
+      });
+    })();")
 
   # Up/down arrow on the Histogram tab steps to the previous/next model (no wrap-around).
   # Ignored with a modifier key held, and when a form control has focus: a focused <select>
@@ -144,7 +165,10 @@ run_prs_app <- function(file = NULL, launch.browser = TRUE) {
   version <- tryCatch(as.character(utils::packageVersion("pgscorer")), error = function(e) "(version unknown)")
 
   ui <- shiny::fluidPage(
-    shiny::tags$head(shiny::tags$style(shiny::HTML(css)), shiny::tags$script(shiny::HTML(arrow_keys))),
+    shiny::tags$head(shiny::tags$style(shiny::HTML(css)), shiny::tags$script(shiny::HTML(arrow_keys)),
+                    shiny::tags$script(shiny::HTML(loading_js))),
+    shiny::div(id = "loading-msg", "Loading the results file ...",
+               shiny::tags$small("Large files can take a minute or more.")),
     shiny::titlePanel("Polygenic risk score results"),
     shiny::fileInput("file", "Results file (.rds saved from compute_prs)", accept = ".rds"),
     shiny::tabsetPanel(
@@ -201,6 +225,12 @@ run_prs_app <- function(file = NULL, launch.browser = TRUE) {
                     error = function(e) conditionMessage(e))
       shiny::validate(shiny::need(is.list(x), paste0("Could not use ", s$name, ": ", x)))
       x
+    })
+
+    # Tell the browser the load is over, whether it worked or not, so it hides the banner.
+    shiny::observe({
+      tryCatch(results(), error = function(e) NULL)
+      session$sendCustomMessage("pgs_loaded", TRUE)
     })
 
     # New file: the trait name defaults to the file's name, and the model pickers refill.

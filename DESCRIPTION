@@ -1,6 +1,6 @@
 Package: pgscorer
 Title: Compute Polygenic Risk Scores from PGS Catalog Models
-Version: 0.2.0.1
+Version: 0.2.0.2
 Authors@R: person("John", "Morrison", email = "jmorr@usc.edu",
     role = c("aut", "cre"))
 Description: Computes polygenic risk scores (PRS) from PGS Catalog scoring
