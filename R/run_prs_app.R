@@ -118,6 +118,7 @@ run_prs_app <- function(file = NULL, launch.browser = TRUE) {
     .skip { color: #8b0000; font-size: 0.9em; }
     .note { font-size: 12px; color: #555; }
     .models { font-family: ui-monospace, Consolas, monospace; }
+    select[size] { width: 100%; }
     .stat { font-size: 16px; font-variant-numeric: tabular-nums; margin: 0.5rem 0 1rem; }
     .hist-stat { font-size: 28px; line-height: 1.3; font-variant-numeric: tabular-nums; margin: 0.5rem 0 1rem; }"
 
@@ -153,13 +154,18 @@ run_prs_app <- function(file = NULL, launch.browser = TRUE) {
         shiny::uiOutput("summary")),
       shiny::tabPanel("Histogram",
         shiny::br(),
-        # A plain <select> (not selectize), so the arrow keys step through the models natively
-        # when it has focus; `arrow_keys` below does the same when focus is elsewhere.
-        shiny::selectInput("hist_model", "Model", choices = NULL, selectize = FALSE),
-        shiny::p(class = "note", shiny::HTML("Tip: press the &uarr; and &darr; arrow keys to move between models.")),
-        shiny::checkboxInput("bin_counts", "Show the number of subjects in each bin", value = FALSE),
-        shiny::plotOutput("hist", height = "420px"),
-        shiny::textOutput("hist_stats", container = function(...) shiny::div(class = "hist-stat", ...))),
+        # The models sit in an always-visible list box (a <select> with `size`, not a drop-down):
+        # a click or an arrow key changes the selection and the plot at once, with no Enter. The
+        # arrow keys step through it natively when it has focus; `arrow_keys` does the same when
+        # focus is elsewhere on the tab.
+        shiny::fluidRow(
+          shiny::column(3,
+            shiny::selectInput("hist_model", "Model", choices = NULL, selectize = FALSE, size = 14),
+            shiny::p(class = "note", shiny::HTML("Click a model, or press the &uarr; and &darr; arrow keys.")),
+            shiny::checkboxInput("bin_counts", "Show the number of subjects in each bin", value = FALSE)),
+          shiny::column(9,
+            shiny::plotOutput("hist", height = "420px"),
+            shiny::textOutput("hist_stats", container = function(...) shiny::div(class = "hist-stat", ...))))),
       shiny::tabPanel("Scatter",
         shiny::br(),
         shiny::fluidRow(
