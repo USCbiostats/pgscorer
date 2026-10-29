@@ -116,13 +116,31 @@ run_prs_app <- function(file = NULL, launch.browser = TRUE) {
     .scroll { overflow-x: auto; max-width: 100%; }
     .scroll tbody th, .scroll tfoot th { position: sticky; left: 0; background: #fff; }
     .skip { color: #8b0000; font-size: 0.9em; }
-    .note { font-size: 0.9rem; color: #555; }
+    .note { font-size: 12px; color: #555; }
     .models { font-family: ui-monospace, Consolas, monospace; }
     .stat { font-size: 16px; font-variant-numeric: tabular-nums; margin: 0.5rem 0 1rem; }
     .hist-stat { font-size: 28px; line-height: 1.3; font-variant-numeric: tabular-nums; margin: 0.5rem 0 1rem; }"
 
+  # Up/down arrow on the Histogram tab steps to the previous/next model (no wrap-around).
+  # Ignored with a modifier key held, and when a form control has focus: a focused <select>
+  # already handles the arrows itself, and text boxes need them.
+  arrow_keys <- "
+    document.addEventListener('keydown', function(e) {
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+      if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+      var t = e.target, tag = t && t.tagName ? t.tagName.toLowerCase() : '';
+      if (tag === 'input' || tag === 'select' || tag === 'textarea' || (t && t.isContentEditable)) return;
+      var sel = document.getElementById('hist_model');
+      if (!sel || sel.offsetParent === null || sel.options.length === 0) return;  // tab not showing
+      var i = sel.selectedIndex + (e.key === 'ArrowDown' ? 1 : -1);
+      e.preventDefault();
+      if (i < 0 || i >= sel.options.length || i === sel.selectedIndex) return;
+      sel.selectedIndex = i;
+      $(sel).trigger('change');
+    });"
+
   ui <- shiny::fluidPage(
-    shiny::tags$head(shiny::tags$style(shiny::HTML(css))),
+    shiny::tags$head(shiny::tags$style(shiny::HTML(css)), shiny::tags$script(shiny::HTML(arrow_keys))),
     shiny::titlePanel("Polygenic risk score results"),
     shiny::fileInput("file", "Results file (.rds saved from compute_prs)", accept = ".rds"),
     shiny::tabsetPanel(
@@ -132,7 +150,10 @@ run_prs_app <- function(file = NULL, launch.browser = TRUE) {
         shiny::uiOutput("summary")),
       shiny::tabPanel("Histogram",
         shiny::br(),
-        shiny::selectInput("hist_model", "Model", choices = NULL),
+        # A plain <select> (not selectize), so the arrow keys step through the models natively
+        # when it has focus; `arrow_keys` below does the same when focus is elsewhere.
+        shiny::selectInput("hist_model", "Model", choices = NULL, selectize = FALSE),
+        shiny::p(class = "note", shiny::HTML("Tip: press the &uarr; and &darr; arrow keys to move between models.")),
         shiny::checkboxInput("bin_counts", "Show the number of subjects in each bin", value = FALSE),
         shiny::plotOutput("hist", height = "420px"),
         shiny::textOutput("hist_stats", container = function(...) shiny::div(class = "hist-stat", ...))),
